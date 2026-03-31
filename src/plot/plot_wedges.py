@@ -22,7 +22,7 @@ else:
     from desiproc.gen_groups import classify_by_probability
     from .common import resolve_raw_path, resolve_probability_path
     from .color_theme import load_theme, apply_matplotlib_theme
-    
+
 matplotlib.use("Agg")
 matplotlib.rcParams['text.usetex'] = True
 matplotlib.rcParams["font.family"] = "serif"
@@ -30,7 +30,7 @@ matplotlib.rcParams["font.family"] = "serif"
 THEME_NAME, THEME = load_theme('PLOT_WEDGE_THEME', default='light')
 apply_matplotlib_theme(THEME)
 CLASS_COLORS = dict(THEME['class_colors'])
-CLASS_ZORDER = {'void': 3, 'sheet': 0, 'filament': 1, 'knot': 2}
+CLASS_ZORDER = {'void': 0, 'sheet': 1, 'filament': 2, 'knot': 3}
 ALL_WEBTYPES = tuple(CLASS_COLORS.keys())
 ORDERED_TRACERS = ['BGS', 'LRG', 'ELG', 'QSO']
 TRACER_ZLIMS = {'BGS': 0.45, 'LRG': 1.0, 'ELG': 1.4, 'QSO': 2.2}
@@ -48,8 +48,9 @@ SECTION_RADIUS_END = 0.98
 RAW_COLS = ['TARGETID','RA','Z','TRACERTYPE','RANDITER']
 GROUPS_COLS = ['TARGETID','TRACERTYPE','RANDITER','GROUPID','NPTS','XCM','YCM','ZCM']
 
-DEFAULT_R_LOWER = -0.9
-DEFAULT_R_UPPER = 0.9
+DEFAULT_R_LOWER = -0.25
+DEFAULT_R_MED = 0.25
+DEFAULT_R_UPPER = 0.65
 
 TEXT_COLOR = THEME['text']
 main_color, sec_color = THEME['primary'], THEME['secondary']
@@ -222,7 +223,7 @@ def read_raw_min(raw_dir, class_dir, zone, out_tag=None):
 def mask_source(randiter, source):
     """
     Masks the data based on the source type.
-    
+
     Args:
         randiter (np.ndarray): Array indicating whether the data is from the random sample (-1) or not.
         source (str): Source type, can be 'data', 'rand', or 'both'.
@@ -304,14 +305,74 @@ def filter_by_iteration(table, iteration):
     return table[mask]
 
 
-def _resolve_r_bounds(table_meta, r_lower_arg, r_upper_arg):
+def _normalize_join_columns(table, keys):
+    """
+    Return a copy of ``table`` with normalized dtypes/values for join ``keys``.
+
+    Normalizations:
+        - TARGETID -> int64
+        - RANDITER -> int64 (mapping unsigned max sentinel to -1)
+        - TRACERTYPE -> stripped unicode strings
+
+    Args:
+        table (Table): Input table to normalize.
+        keys (Iterable[str]): Column names used as join keys.
+    Returns:
+        Table: Normalized copy of the input table.
+    """
+    norm = table.copy()
+
+    if 'TARGETID' in keys and 'TARGETID' in norm.colnames:
+        targetid = np.asarray(norm['TARGETID'])
+        try:
+            norm['TARGETID'] = targetid.astype(np.int64, copy=False)
+        except Exception:
+            norm['TARGETID'] = np.asarray([int(v) for v in targetid], dtype=np.int64)
+
+    if 'RANDITER' in keys and 'RANDITER' in norm.colnames:
+        randiter = np.asarray(norm['RANDITER'])
+        if np.issubdtype(randiter.dtype, np.unsignedinteger):
+            sentinel = np.iinfo(randiter.dtype).max
+            values = randiter.astype(np.int64, copy=False)
+            values[values == int(sentinel)] = -1
+            norm['RANDITER'] = values
+        else:
+            try:
+                norm['RANDITER'] = randiter.astype(np.int64, copy=False)
+            except Exception:
+                norm['RANDITER'] = np.asarray([int(v) for v in randiter], dtype=np.int64)
+
+    if 'TRACERTYPE' in keys and 'TRACERTYPE' in norm.colnames:
+        tracer_arr = np.asarray(norm['TRACERTYPE'])
+
+        def _norm_tracer(v):
+            if isinstance(v, (bytes, bytearray)):
+                try:
+                    return v.decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    return v.decode('latin-1', errors='ignore').strip()
+            return str(v).strip()
+
+        norm['TRACERTYPE'] = np.asarray([_norm_tracer(v) for v in tracer_arr], dtype='U32')
+
+    return norm
+
+
+def _resolve_r_bounds(table_meta, r_lower_arg, r_upper_arg, r_med_arg):
     """
     Determine the r-thresholds used to map counts to web types.
-
     Preference order:
         1. Explicit CLI overrides.
         2. FITS metadata (RLOWER/RUPPER or variants).
         3. Default constants.
+
+    Args:
+        table_meta: FITS metadata dictionary.
+        r_lower_arg: Lower r-threshold from CLI.
+        r_upper_arg: Upper r-threshold from CLI.
+        r_med_arg: Medium r-threshold from CLI.
+    Returns:
+        tuple[float, float, float]: The resolved r-thresholds.
     """
     def _coerce(value, fallback):
         if value is None:
@@ -323,24 +384,29 @@ def _resolve_r_bounds(table_meta, r_lower_arg, r_upper_arg):
 
     lower = _coerce(r_lower_arg, None)
     upper = _coerce(r_upper_arg, None)
+    med = _coerce(r_med_arg, None)
 
     if lower is None and table_meta is not None:
         lower = _coerce(table_meta.get('RLOWER', table_meta.get('R_LOWER')), None)
     if upper is None and table_meta is not None:
         upper = _coerce(table_meta.get('RUPPER', table_meta.get('R_UPPER')), None)
+    if med is None and table_meta is not None:
+        med = _coerce(table_meta.get('RMED', table_meta.get('R_MED')), None)
 
     if lower is None:
         lower = DEFAULT_R_LOWER
     if upper is None:
         upper = DEFAULT_R_UPPER
+    if med is None:
+        med = DEFAULT_R_MED
 
     if lower >= 0 or upper <= 0:
         raise ValueError(f'r thresholds must straddle zero (got r_lower={lower}, r_upper={upper})')
 
-    return lower, upper
+    return lower, upper, med
 
 
-def compute_webtypes_from_counts(table, r_lower, r_upper):
+def compute_webtypes_from_counts(table, r_lower, r_upper, r_med):
     """
     Compute web-type labels from NDATA/NRAND counts.
 
@@ -348,6 +414,7 @@ def compute_webtypes_from_counts(table, r_lower, r_upper):
         table (Table): Classification table with ``NDATA`` and ``NRAND`` columns.
         r_lower (float): Lower threshold for ``r``.
         r_upper (float): Upper threshold for ``r``.
+        r_med (float): medium threshold for ``r``.
     Returns:
         tuple[np.ndarray, np.ndarray]: (webtypes array, valid mask).
     """
@@ -360,7 +427,7 @@ def compute_webtypes_from_counts(table, r_lower, r_upper):
     r_vals = np.full(ndata.size, np.nan, dtype=np.float64)
     np.divide(ndata - nrand, denom, out=r_vals, where=(denom > 0))
 
-    bins = np.array([r_lower, 0.0, r_upper], dtype=float)
+    bins = np.array([r_lower, r_med, r_upper], dtype=float)
     webtypes = np.full(r_vals.size, '', dtype='U8')
     valid = np.isfinite(r_vals)
     if np.any(valid):
@@ -373,7 +440,7 @@ def compute_webtypes_from_counts(table, r_lower, r_upper):
 def classify_webtypes(prob_df):
     """
     Classify most likely web type per row from probability dataframe.
-    
+
     Args:
         prob_df (pd.DataFrame): DataFrame containing probability scores for each web type.
     Returns:
@@ -383,12 +450,16 @@ def classify_webtypes(prob_df):
     if prob_df.empty:
         return np.empty(0, dtype='U8')
 
-    cols = ['PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']
+    cols = ['PVOID', 'PSHEET', 'PFILAMENT']
     missing = [col for col in cols if col not in prob_df.columns]
     if missing:
         raise ValueError(f'Probability table missing columns: {missing}')
+    if 'PKNOT' in prob_df.columns:
+        cols.append('PKNOT')
 
     arr = prob_df[cols].to_numpy(dtype=np.float64, copy=True)
+    if 'PKNOT' not in prob_df.columns:
+        arr = np.column_stack((arr, np.zeros(arr.shape[0], dtype=np.float64)))
     arr = np.nan_to_num(arr, nan=-np.inf)
     idx = np.argmax(arr, axis=1)
     mapping = np.array(['void', 'sheet', 'filament', 'knot'], dtype='U8')
@@ -405,7 +476,7 @@ def resolve_zones(release, zone_arg):
 
     EDR accepts integers 0..19 or the token ``all`` (default). DR1 expects an
     explicit zone name (e.g., ``NGC1``). DR2 accepts ``NGC``, ``SGC``, or ``all``.
-    
+
     Args:
         release (str): The release version (e.g., "EDR" or "DR1").
         zone_arg (str | list): The zone(s) to process, can be a single zone name or a list of names.
@@ -521,7 +592,7 @@ def parse_tracer_slice_specs(specs):
 def tracer_prefixes(tr_types):
     """
     Extracts the tracer prefixes from the TRACERTYPE strings.
-    
+
     Args:
         tr_types (np.ndarray): Array of TRACERTYPE strings.
     Returns:
@@ -533,7 +604,7 @@ def tracer_prefixes(tr_types):
 def pick_tracers(available, wanted):
     """
     Selects the tracers from the available ones based on the wanted list.
-    
+
     Args:
         available (np.ndarray): Array of available tracer prefixes.
         wanted (list or None): List of wanted tracer prefixes. If None, all available tracers are returned.
@@ -551,7 +622,7 @@ def pick_tracers(available, wanted):
 def subplot_grid(n):
     """
     Computes the number of rows and columns for subplots based on the number of tracers.
-    
+
     Args:
         n (int): Number of tracers.
     Returns:
@@ -570,7 +641,7 @@ def _init_ax(ax, title, *, color=TEXT_COLOR):
         ax (matplotlib.axes.Axes): The axis to initialize.
         title (str): The title for the plot.
     """
-    ax.set_title(title, fontsize=18, y=1.09, color=color)
+    ax.set_title(title, fontsize=22, y=1.11, color=color)
     for sp in ax.spines.values():
         sp.set_visible(False)
     ax.set_xticks([]); ax.set_yticks([])
@@ -579,7 +650,7 @@ def _init_ax(ax, title, *, color=TEXT_COLOR):
 def _compute_zone_params(ravec, zvec, z_lim):
     """
     Computes parameters for the zone plot based on RA and redshift vectors.
-    
+
     Args:
         ravec (np.ndarray): Array of RA values.
         zvec (np.ndarray): Array of redshift values.
@@ -671,8 +742,8 @@ def _annotate_ra_top(ax, ra_ticks, ra_ctr, Dc, y_max):
     top4 = np.linspace(ra_ticks.min(), ra_ticks.max(), 4)
     x_top = Dc * np.deg2rad(top4 - ra_ctr)
     for xt, rt in zip(x_top, top4):
-        ax.text(xt, y_max + 0.01*y_max, f'{rt:.0f}', ha='center', va='bottom', fontsize=19, color=TEXT_COLOR)
-    ax.text(0, y_max + 0.05*y_max, 'RA (deg)', ha='center', va='bottom', fontsize=19, color=TEXT_COLOR)
+        ax.text(xt, y_max + 0.02*y_max, rf'${rt:.0f}$', ha='center', va='bottom', fontsize=20, color=TEXT_COLOR, fontweight='bold')
+    ax.text(0, y_max + 0.07*y_max, r'$\mathrm{RA (deg)}$', ha='center', va='bottom', fontsize=20, color=TEXT_COLOR)
 
 
 def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
@@ -691,7 +762,7 @@ def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
         x0r = half_w * (z0 / y_max) if y_max > 0 else 0
         angle = np.degrees(np.arctan2(-z0, -x0r)) if y_max > 0 else 0
         offset = np.sign(x0r) * half_w * 0.11 if np.abs(x0r) > 1e-6 else half_w * 0.11
-        ax.text(x0r + offset, z0, f'{z0:.2f}', ha='left', va='center', rotation=angle + 180, fontsize=20, color=TEXT_COLOR)
+        ax.text(x0r + offset, z0, rf'${z0:.2f}$', ha='left', va='center', rotation=angle + 180, fontsize=20, color=TEXT_COLOR, fontweight='bold')
     if idx == 0:
         ax.set_ylabel(ylabel, fontsize=30, labelpad=15, color=TEXT_COLOR)
 
@@ -699,7 +770,7 @@ def _annotate_y_side(ax, z_ticks, half_w, y_max, idx, ylabel):
 def _section_coordinates(theta, radius):
     """
     Convert polar coordinates (theta, radius) to Cartesian coordinates for fan view.
-    
+
     Args:
         theta (np.ndarray): Array of angle values in radians.
         radius (np.ndarray): Array of radius values.
@@ -716,7 +787,7 @@ def _draw_section_grid(ax, theta_min, theta_max, r_inner, r_outer, n_ra, n_z,
     """
     Draw helper grid lines for the fan/section view: concentric arcs and radial spokes.
     Returns the theta and radius tick arrays used for labelling.
-    
+
     Args:
         ax (matplotlib.axes.Axes): The axis on which to draw the grid.
         theta_min (float): Minimum angle in radians.
@@ -748,7 +819,7 @@ def _draw_section_grid(ax, theta_min, theta_max, r_inner, r_outer, n_ra, n_z,
 def _draw_section_borders(ax, theta_min, theta_max, r_inner, r_outer, color=SECTION_BORDER_COLOR):
     """
     Draw the outer/inner arcs and radial edges of the fan view.
-    
+
     Args:
         ax (matplotlib.axes.Axes): The axis on which to draw the borders.
         theta_min (float): Minimum angle in radians.
@@ -772,7 +843,7 @@ def _annotate_section_axes(ax, theta_ticks, ra_labels, r_tick_disp, r_tick_label
                            text_color=SECTION_TEXT_COLOR):
     """
     Annotate RA labels along the outer arc and radial ticks along the left edge for fan view.
-    
+
     Args:
         ax (matplotlib.axes.Axes): The axis on which to draw the annotations.
         theta_ticks (np.ndarray): Array of theta tick values in radians.
@@ -789,24 +860,24 @@ def _annotate_section_axes(ax, theta_ticks, ra_labels, r_tick_disp, r_tick_label
     for th, ra_val in zip(theta_outer, ra_labels):
         x, y = _section_coordinates(th, r_outer * 1.02)
         angle = np.degrees(th)
-        ax.text(x, y, f'{ra_val:.0f}', ha='center', va='bottom', fontsize=11, color=text_color,
-                rotation=angle, rotation_mode='anchor')
+        ax.text(x, y, rf'${ra_val:.0f}$', ha='center', va='bottom', fontsize=11, color=text_color,
+                rotation=angle, rotation_mode='anchor', fontweight='bold')
     theta_left = theta_outer[0]
     x_left, y_left = _section_coordinates(theta_left, r_outer * 0.5)
     ax.text(x_left - 0.05 * r_outer, y_left, ylabel, rotation=90,
-            ha='center', va='center', fontsize=12, color=text_color)
+            ha='center', va='center', fontsize=12, color=text_color, fontweight='bold')
     for disp_val, label in zip(r_tick_disp, r_tick_labels):
         x_r, y_r = _section_coordinates(theta_left, disp_val)
-        ax.text(x_r - 0.03 * r_outer, y_r, f'{label:.2f}', ha='right', va='center',
-                fontsize=10, color=text_color)
-    ax.text(0, r_outer * 1.08, 'RA (deg)', ha='center', va='bottom',
-            fontsize=12, color=text_color)
+        ax.text(x_r - 0.03 * r_outer, y_r, rf'${label:.2f}$', ha='right', va='center',
+                fontsize=10, color=text_color, fontweight='bold')
+    ax.text(0, r_outer * 1.1, r'$\mathrm{RA (deg)}$', ha='center', va='bottom',
+            fontsize=12, color=text_color, fontweight='bold')
 
 
 def _map_section_radius(values, r_inner, r_outer, start=SECTION_RADIUS_START, end=SECTION_RADIUS_END):
     """
     Map physical radii (e.g., z) to display radii for the section plot.
-    
+
     Args:
         values (np.ndarray): Array of physical radius values.
         r_inner (float): Inner physical radius.
@@ -901,10 +972,10 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
 
     default_title = f'{webtype.capitalize()}s in zone {zone_tag(zone)}'
     if color_mode == 'webtype':
-        sp_t = 1.07
+        sp_t = 1.01
     else:
         sp_t = 1.01
-    plt.suptitle(title or default_title, fontsize=20, y=sp_t if not section_mode else 0.95, color=text_color)
+    plt.suptitle(title or default_title, fontsize=24, y=sp_t if not section_mode else 0.95, color=text_color)
     if section_mode:
         fig.patch.set_facecolor(SECTION_BG_COLOR)
         fig.set_facecolor(SECTION_BG_COLOR)
@@ -1016,7 +1087,7 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
             theta_ticks, _ = _draw_section_grid(ax, theta_min, theta_max, disp_inner, disp_outer,
                                                 n_ra, n_z, grid_color_local, r_ticks=disp_r_ticks_values)
             ra_tick_labels = ra_ctr + np.rad2deg(theta_ticks)
-            ylabel = 'z' if coord == 'z' else r'$D_c$ [Mpc]'
+            ylabel = '$z$' if coord == 'z' else r'$D_c$ [Mpc]'
             _draw_section_borders(ax, theta_min, theta_max, disp_inner, disp_outer, border_color_local)
             _annotate_section_axes(ax, theta_ticks,
                                    ra_tick_labels, disp_r_ticks_values, actual_r_ticks,
@@ -1097,10 +1168,10 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
                 if not np.any(sel):
                     continue
                 used_webtypes.add(wt)
-                ax.scatter(x_sel[sel], y_sel[sel], s=point_size,
+                ax.scatter(x_sel[sel], y_sel[sel], s=2,
                            c=CLASS_COLORS.get(wt, CLASS_FALLBACK_COLOR), alpha=1.0,
                            zorder=2 + CLASS_ZORDER.get(wt, 0),
-                           edgecolor=SCATTER_EDGE_COLOR, lw=0.15,)
+                           edgecolor=SCATTER_EDGE_COLOR, lw=0.1,)
         else:  # mono
             ax.scatter(x_sel, y_sel, s=point_size, c=mono_color,
                        alpha=0.65, edgecolor='none')
@@ -1155,8 +1226,8 @@ def plot_wedges(joined, tracers, zone, webtype, out_png, smin, max_z, n_ra=15, n
             legend_handles = handles
 
     if legend_handles:
-        fig.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, 1.02),
-                   ncol=min(len(legend_handles), 4), frameon=True, fontsize=20,
+        fig.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, -0.0),
+                   ncol=min(len(legend_handles), 4), frameon=True, fontsize=22,
                    labelcolor=text_color)
 
     fig.savefig(out_png, dpi=360, bbox_inches='tight')
@@ -1169,7 +1240,7 @@ def _aggregate_group_centers(joined):
     """
     Aggregate per-group centers from the joined table (which has RA, Z, TRACERTYPE, GROUPID, NPTS).
     Returns arrays per unique group with median RA/Z and associated tracer prefix and NPTS.
-    
+
     Args:
         joined (pd.DataFrame): The joined data containing tracer information.
     Returns:
@@ -1202,7 +1273,7 @@ def plot_group_centers(joined, tracers, zone, webtype, out_png, min_npts=2, max_
     """
     Plot per-group centers (median RA/z) for the selected tracers.
     Sizes points by group membership (NPTS). Reuses the wedge layout.
-    
+
     Args:
         joined (pd.DataFrame): The joined data containing tracer information.
         tracers (list): List of tracer types to plot.
@@ -1323,7 +1394,7 @@ def parse_args():
     p.add_argument('--use-presets', action='store_true', help='Apply tracer-specific defaults to emphasize filaments (e.g., higher min-npts for LRG)')
     p.add_argument('--highlight-longest', type=int, default=None, help='Highlight top-K longest groups per tracer (projected)')
     p.add_argument('--highlight-connect', action='store_true', help='Connect points for highlighted groups')
-    p.add_argument('--r-lower', type=float, default=None, help='Lower r threshold (<0) for mapping counts to web types (default: header value or -0.9)')
+    p.add_argument('--r-lower', type=float, default=None, help='Lower r threshold (<0) for mapping counts to web types (default: header value or -0.3)')
     p.add_argument('--r-upper', type=float, default=None, help='Upper r threshold (>0) for mapping counts to web types (default: header value or 0.9)')
     return p.parse_args()
 
@@ -1506,12 +1577,11 @@ def main():
             except Exception as exc:
                 raise RuntimeError(f'Failed to compute probability webtypes for zone {zone_tag(zone)}: {exc}') from exc
 
-            if 'RANDITER' not in prob_tbl.colnames:
-                print(f'Skipping zone {zone_tag(zone)}: probability table missing RANDITER.', file=sys.stderr)
-                continue
-
-            pm = mask_source(np.asarray(prob_tbl['RANDITER']), args.source)
-            prob_tbl = prob_tbl[pm]
+            if 'RANDITER' in prob_tbl.colnames:
+                pm = mask_source(np.asarray(prob_tbl['RANDITER']), args.source)
+                prob_tbl = prob_tbl[pm]
+            elif str(args.source).lower() == 'rand':
+                prob_tbl = prob_tbl[:0]
             if iter_filter:
                 prob_tbl = filter_randiters(prob_tbl, iter_filter)
 
@@ -1519,20 +1589,47 @@ def main():
                 print(f'Skipping zone {zone_tag(zone)}: probability table empty after filters.', file=sys.stderr)
                 continue
 
-            join_keys = ['TARGETID', 'RANDITER']
-            missing_keys = [key for key in join_keys if key not in prob_tbl.colnames]
-            if missing_keys:
-                missing = ', '.join(missing_keys)
-                print(f'Skipping zone {zone_tag(zone)}: probability table missing columns: {missing}', file=sys.stderr)
-                continue
-
-            keep_cols = [c for c in ('TARGETID', 'RANDITER', 'WEBTYPE') if c in prob_tbl.colnames]
+            keep_cols = [c for c in ('TARGETID', 'TRACERTYPE', 'RANDITER', 'WEBTYPE') if c in prob_tbl.colnames]
             prob_view = prob_tbl[keep_cols]
+            join_candidates = []
+            if 'RANDITER' in prob_view.colnames and 'RANDITER' in raw.colnames:
+                join_candidates.append(['TARGETID', 'RANDITER'])
+            if 'TRACERTYPE' in prob_view.colnames and 'TRACERTYPE' in raw.colnames:
+                join_candidates.append(['TARGETID', 'TRACERTYPE'])
+            join_candidates.append(['TARGETID'])
 
-            joined_types = join(raw, prob_view, keys=join_keys, join_type='inner')
-            if len(joined_types) == 0:
-                print(f'Skipping zone {zone_tag(zone)}: no overlap between raw and probability tables.', file=sys.stderr)
+            seen = set()
+            ordered_candidates = []
+            for keys in join_candidates:
+                token = tuple(keys)
+                if token in seen:
+                    continue
+                seen.add(token)
+                ordered_candidates.append(keys)
+
+            joined_types = None
+            used_keys = None
+            for keys in ordered_candidates:
+                if any(key not in raw.colnames for key in keys):
+                    continue
+                if any(key not in prob_view.colnames for key in keys):
+                    continue
+                raw_norm = _normalize_join_columns(raw, keys)
+                prob_norm = _normalize_join_columns(prob_view, keys)
+                candidate = join(raw_norm, prob_norm, keys=keys, join_type='inner')
+                if len(candidate) == 0:
+                    continue
+                joined_types = candidate
+                used_keys = keys
+                break
+
+            if joined_types is None or len(joined_types) == 0:
+                attempted = ' -> '.join('+'.join(keys) for keys in ordered_candidates)
+                print(f'Skipping zone {zone_tag(zone)}: no overlap between raw and probability tables (attempted keys: {attempted}).',
+                      file=sys.stderr)
                 continue
+            if used_keys and used_keys != ordered_candidates[0]:
+                print(f'Zone {zone_tag(zone)}: recovered overlap using fallback join keys {"+".join(used_keys)}.', file=sys.stderr)
 
             plot_table = joined_types
             present = np.char.lower(np.unique(np.asarray(plot_table['WEBTYPE']).astype(str)))
@@ -1586,8 +1683,8 @@ def main():
             source_iter_line = source_label
         mode_kwargs = {
             'groups': dict(color_mode='group', title=f"{webtype_arg.capitalize()}s in zone {zone_label}\n{source_iter_line}"),
-            'types': dict(color_mode='webtype', title=f"Zone {zone_label}\n{source_iter_line}", webtype_order=legend_order),
-            'structure': dict(color_mode='mono', title=f"Zone {zone_label}\n{source_iter_line}")
+            'types': dict(color_mode='webtype', title=f"Zone {zone_label} - {source_iter_line}", webtype_order=legend_order),
+            'structure': dict(color_mode='mono', title=f"Zone {zone_label} - {source_iter_line}")
         }
 
         mode_args = mode_kwargs[mode]

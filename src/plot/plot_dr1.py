@@ -48,11 +48,16 @@ def _identify_tracer(label):
 
 
 def _classify_webtypes(table):
-    cols = ['PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']
+    cols = ['PVOID', 'PSHEET', 'PFILAMENT']
     for col in cols:
         if col not in table.colnames:
             raise KeyError(f'Missing probability column {col}.')
+    has_pknot = 'PKNOT' in table.colnames
+    if has_pknot:
+        cols.append('PKNOT')
     arr = np.vstack([np.asarray(table[col], dtype=float) for col in cols]).T
+    if not has_pknot:
+        arr = np.column_stack((arr, np.zeros(arr.shape[0], dtype=float)))
     finite_mask = np.isfinite(arr).any(axis=1)
     safe_arr = np.where(np.isfinite(arr), arr, -np.inf)
     idx = np.argmax(safe_arr, axis=1)

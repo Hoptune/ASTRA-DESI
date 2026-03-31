@@ -16,11 +16,11 @@ _COLOR_THEMES: Dict[str, Dict[str, object]] = {
         'figure_facecolor': '#ffffff',
         'axes_facecolor': '#ffffff',
         'class_colors': {
-            'void': 'crimson',
-            'sheet': 'lightskyblue',
-            'filament': 'royalblue',
-            'knot': 'navy',
-        },
+                         'void': 'red',
+                         'sheet': 'orange',
+                         'filament':'green',
+                         'knot': 'blue'
+                         },
         'class_fallback': '#808080',
     },
     'dark': {
@@ -51,13 +51,15 @@ def _normalise_name(name: Optional[str], default: str) -> str:
 
 
 def available_themes() -> Tuple[str, ...]:
-    """Return the list of registered theme names."""
-
+    """
+    Return the list of registered theme names.
+    """
     return tuple(sorted(_COLOR_THEMES))
 
 
 def load_theme(env_var: str = 'PLOT_THEME', default: str = 'light') -> Tuple[str, Dict[str, object]]:
-    """Resolve the theme dictionary.
+    """
+    Resolve the theme dictionary.
 
     Looks first at ``env_var``; if unset, falls back to ``PLOT_THEME`` and
     finally to ``default``.
@@ -76,8 +78,9 @@ def load_theme(env_var: str = 'PLOT_THEME', default: str = 'light') -> Tuple[str
 
 
 def apply_matplotlib_theme(theme: Dict[str, object]) -> None:
-    """Apply the relevant ``matplotlib`` rcParams for *theme*."""
-
+    """
+    Apply the relevant ``matplotlib`` rcParams for *theme*.
+    """
     text_color = theme['text']
     secondary = theme['secondary']
 
