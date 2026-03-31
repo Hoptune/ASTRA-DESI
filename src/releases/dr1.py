@@ -28,7 +28,7 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
                      output_raw, n_random, zone_value, out_tag, release_tag):
     """
     Build and persist the DR1 raw table for ``zone_label`` applying ``cuts``.
-    
+
     Args:
         zone_label: Label for the zone being processed.
         cuts: Dictionary with the cuts to apply.
@@ -87,7 +87,7 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
 def create_config(args: Namespace) -> ReleaseConfig:
     """
     Create the release configuration from command line arguments.
-    
+
     Args:
         args: Parsed command line arguments.
     Returns:
@@ -111,7 +111,7 @@ def create_config(args: Namespace) -> ReleaseConfig:
     def _build(zone, real_tables, random_tables, sel_tracers, parsed_args, release_tag):
         """
         Build the raw table for a given zone.
-        
+
         Args:
             zone: Zone label.
             real_tables: Dictionary with real tables per tracer.

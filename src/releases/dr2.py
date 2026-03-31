@@ -25,8 +25,8 @@ DEFAULT_ZONES = ['NGC', 'SGC']
 TRACER_IDS = {name: idx for idx, name in enumerate(TRACERS)}
 TRACER_FULL_LABELS = {}
 for tracer_name, tracer_idx in TRACER_IDS.items():
-    TRACER_FULL_LABELS[(tracer_idx, True)] = f'{tracer_name}_DATA'.encode('ascii')
-    TRACER_FULL_LABELS[(tracer_idx, False)] = f'{tracer_name}_RAND'.encode('ascii')
+    TRACER_FULL_LABELS[(tracer_idx, True)] = f'{tracer_name}'.encode('ascii')
+    TRACER_FULL_LABELS[(tracer_idx, False)] = f'{tracer_name}'.encode('ascii')
 
 
 def _progress(message: str) -> None:
@@ -41,7 +41,7 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
                        n_random, zone_value, out_tag, release_tag):
     """
     Build and persist the DR2 raw table for ``zone_label``.
-    
+
     Args:
         zone_label: Label for the zone being processed.
         tracers: List of tracers to process.
@@ -195,12 +195,12 @@ def build_raw_dr2_zone(zone_label, tracers, real_tables, random_tables, output_r
 def create_config(args: Namespace) -> ReleaseConfig:
     """
     Create the release configuration from command line arguments.
-    
-    Args:        
+
+    Args:
         args: Parsed command line arguments.
-    Returns:        
+    Returns:
         The release configuration object.
-    Raises:        
+    Raises:
         RuntimeError: If --config is provided or if zones are missing cuts.
     """
     if args.config:
