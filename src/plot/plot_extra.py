@@ -1,4 +1,4 @@
-import argparse, os, re
+import argparse, os, re, pickle
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
@@ -30,6 +30,7 @@ else:
     from .color_theme import load_theme, apply_matplotlib_theme
 
 PLOT_DPI = 50
+CDF_COUNTS_VERSION = 'rawmerge1'
 CACHE_VERSION = 'v5'
 try:
     _DEFAULT_RAW_LIMIT = int(os.environ.get('PLOT_EXTRA_RAW_LIMIT', '3000000'))
@@ -51,7 +52,7 @@ _BYTES_TYPES = (bytes, bytearray)
 if _NP_BYTES_TYPE is not None and _NP_BYTES_TYPE not in _BYTES_TYPES:
     _BYTES_TYPES = _BYTES_TYPES + (_NP_BYTES_TYPE,)
 
-THEME_NAME, THEME = load_theme('PLOT_EXTRA_THEME', default='dark')
+THEME_NAME, THEME = load_theme('PLOT_EXTRA_THEME', default='light')
 apply_matplotlib_theme(THEME)
 
 TEXT_COLOR = THEME['text']
@@ -81,7 +82,7 @@ _TRACER_COLORS = {'BGS': 'blue',
 def _tracer_key(tracer):
     """
     Return a normalized key for *tracer* (uppercase string or empty string if None).
-    
+
     Args:
         tracer (str | None): Tracer label.
     Returns:
@@ -112,7 +113,7 @@ def _tracer_prefixes(tracer):
 def _tracer_display_name(tracer):
     """
     Return a display name for *tracer*.
-    
+
     Args:
         tracer (str | None): Tracer label.
     """
@@ -127,7 +128,7 @@ def _tracer_display_name(tracer):
 def _tracer_color(tracer):
     """
     Return a color for *tracer*.
-    
+
     Args:
         tracer (str | None): Tracer label.
     Returns:
@@ -144,7 +145,7 @@ def _tracer_color(tracer):
 def _is_text_like(value):
     """
     Return True if *value* is None, pd.NA, NaN, or a string.
-    
+
     Args:
         value: Any value.
     Returns:
@@ -167,7 +168,7 @@ def _is_text_like(value):
 def _coerce_text(value):
     """
     Coerce *value* to a string, handling bytes and None/pd.NA.
-    
+
     Args:
         value: Any value.
     Returns:
@@ -193,7 +194,7 @@ def _coerce_text(value):
 def _ensure_text_column(df, column):
     """
     Ensure that the specified *column* in *df* contains only text-like values.
-    
+
     Args:
         df (pd.DataFrame): The DataFrame to modify.
         column (str): The column name to ensure text-like values.
@@ -218,7 +219,7 @@ def _ensure_text_column(df, column):
 def _sanitize_tracer_columns(df):
     """
     Ensure that tracer-related columns in *df* contain only text-like values.
-    
+
     Args:
         df (pd.DataFrame | None): The DataFrame to sanitize, or None.
     Returns:
@@ -234,7 +235,7 @@ def _sanitize_tracer_columns(df):
 def _max_mtime(paths):
     """
     Return the maximum modification time among existing files in *paths*.
-    
+
     Args:
         paths (list[str]): List of file paths.
     Returns:
@@ -247,7 +248,7 @@ def _max_mtime(paths):
 def _cache_file(cache_dir, key):
     """
     Return the path to a cache file for *key* in *cache_dir*.
-    
+
     Args:
         cache_dir (str | None): Directory to store cache files, or None to disable caching.
         key (str): Unique key identifying the cache file.
@@ -265,7 +266,7 @@ def _load_or_build_df(cache_dir, key, source_paths, builder, progress=False):
     """
     Load a DataFrame from cache or build it using *builder*.
     Cache invalidates automatically if any source path is newer than the cache file.
-    
+
     Args:
         cache_dir (str | None): Directory to store cache files, or None to disable caching.
         key (str): Unique key identifying the cache file.
@@ -301,7 +302,7 @@ def _load_or_build_df(cache_dir, key, source_paths, builder, progress=False):
 def _zone_cache_key(kind, zone, tag_list):
     """
     Create a cache key for a zone and list of tags.
-    
+
     Args:
         kind (str): Kind of data (e.g., 'raw', 'class', 'r').
         zone (int|str): Zone identifier (e.g., 0, 01, 12, or 'NGC1').
@@ -320,7 +321,7 @@ def _zone_cache_key(kind, zone, tag_list):
 def get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     """
     Get the paths to raw and classification files for a specific zone.
-    
+
     Args:
         raw_dir (str): Path to the raw data directory.
         class_dir (str): Path to the classification directory.
@@ -337,7 +338,7 @@ def get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
 def get_prob_path(raw_dir, class_dir, zone, out_tag=None):
     """
     Get the path to the probability file for a specific zone.
-    
+
     Args:
         raw_dir (str): Path to the raw data directory.
         class_dir (str): Path to the classification directory.
@@ -352,7 +353,7 @@ def get_prob_path(raw_dir, class_dir, zone, out_tag=None):
 def _expected_class_path(class_dir, zone, tag):
     """
     Get the expected classification file path, handling legacy layout.
-    
+
     Args:
         class_dir (str): Release directory containing the `classification` subfolder.
         zone (int|str): Zone identifier (e.g., 0, 01, 12, or 'NGC1').
@@ -371,7 +372,7 @@ def _expected_class_path(class_dir, zone, tag):
 def _expected_prob_path(class_dir, zone, tag):
     """
     Get the expected probability file path, handling legacy layout.
-    
+
     Args:
         class_dir (str): Release directory containing the `classification` subfolder.
         zone (int|str): Zone identifier (e.g., 0, 01, 12, or 'NGC1').
@@ -390,7 +391,7 @@ def _expected_prob_path(class_dir, zone, tag):
 def _raw_candidate(raw_dir, zone, tag):
     """
     Get the candidate raw file path, handling legacy layout.
-    
+
     Args:
         raw_dir (str): Raw directory path (used to validate raw files exist).
         zone (int|str): Zone identifier (e.g., 0 or 'NGC1').
@@ -639,7 +640,7 @@ def make_output_dirs(base):
 def load_raw_df(path):
     """
     Load raw data from FITS file into a pandas DataFrame.
-    
+
     Args:
         path (str): Path to the FITS file.
     Returns:
@@ -742,22 +743,35 @@ def load_class_df(path, target_ids=None, chunk_rows=None, downcast=True):
 def load_prob_df(path):
     """
     Load probability data from FITS file into a pandas DataFrame.
-    
+
     Args:
         path (str): Path to the FITS file.
     Returns:
         pd.DataFrame: DataFrame containing the probability data with CLASS column.
     """
-    frame = load_probability_dataframe(path)
     prob_cols = ['PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']
+    frame = load_probability_dataframe(path, include_random=True)
+    if 'ISDATA' in frame.columns:
+        frame = frame[frame['ISDATA'] == True]
+    p_sum = frame[prob_cols].to_numpy(dtype=float, copy=False).sum(axis=1)
+    frame = frame.assign(_P_SUM=p_sum)
+    if 'TARGETID' in frame.columns:
+        frame = frame.sort_values(['TARGETID', '_P_SUM'], ascending=[True, False])
+        frame = frame.drop_duplicates(subset=['TARGETID'], keep='first')
+    frame = frame[frame['_P_SUM'] > 0.0]
     frame['CLASS'] = frame[prob_cols].idxmax(axis=1).str[1:].str.lower()
-    return frame[['TARGETID', 'CLASS', 'PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT']]
+    keep = ['TARGETID']
+    for col in ('TRACERTYPE', 'RANDITER', 'ISDATA'):
+        if col in frame.columns:
+            keep.append(col)
+    keep.extend(['CLASS', 'PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT'])
+    return frame[keep]
 
 
 def _concat_existing(paths, loader):
     """
     Concatenate DataFrames loaded from existing files in *paths* using *loader*.
-    
+
     Args:
         paths (list[str]): List of file paths.
         loader (callable): Function that takes a file path and returns a pd.DataFrame.
@@ -970,7 +984,7 @@ def plot_radial_distribution(raw_df, zone, tracers, out_dir, bins):
 def plot_cdf(df_r, zone, tracers, out_dir):
     """
     Plot CDF of r values for specified tracers using NumPy ECDF.
-    
+
     Args:
         df_r (pd.DataFrame): DataFrame containing 'r' values and 'TRACERTYPE' columns.
         zone (int): Zone number for title and filename.
@@ -1025,7 +1039,7 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
                         cache_dir=None, tags_map=None, zone_files_map=None):
     """
     Plot the dispersion (percentile band) of CDFs over multiple zones in one figure.
-    
+
     Args:
         raw_dir (str): Directory with raw zone files.
         class_dir (str): Directory with class zone files.
@@ -1043,6 +1057,7 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
     """
     if tracers is None:
         tracers = ['BGS_BRIGHT','ELG','LRG','QSO']
+    zones = list(zones)
 
     xgrid = np.linspace(-1.0, 1.0, xbins)
 
@@ -1054,66 +1069,10 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
 
     per_tracer_real = {t: [] for t in tracers}
     per_tracer_rand = {t: [] for t in tracers}
-
-    def _build_zone_cdf_state(zone, usable_entries):
-        tracer_state = {tr: {'real': _CDFSeriesAccumulator(xgrid),
-                             'rand': _CDFSeriesAccumulator(xgrid)}
-                        for tr in tracers}
-
-        data_seen = set()
-
-        for entry in usable_entries:
-            class_paths = list(_entry_class_paths(entry))
-            if not class_paths:
-                continue
-
-            entry_key = entry.get('tag') or '(combined)'
-
-            for cls_path, cache_token in class_paths:
-                cls_df = _load_entry_class(entry, zone, cache_dir,
-                                           target_ids=None,
-                                           progress=progress,
-                                           path_override=cls_path,
-                                           cache_token=cache_token,
-                                           allow_cache=False)
-                if cls_df.empty:
-                    continue
-
-                _sanitize_tracer_columns(cls_df)
-
-                if entry_key in data_seen:
-                    cls_df = cls_df[cls_df.get('ISDATA') == False]
-                else:
-                    data_seen.add(entry_key)
-
-                if cls_df.empty:
-                    continue
-
-                r_df = compute_r(cls_df)
-                if 'TRACERTYPE' not in r_df.columns or 'ISDATA' not in r_df.columns or 'r' not in r_df.columns:
-                    continue
-
-                tracer_series = r_df['TRACERTYPE'].astype(str)
-                for tr in tracers:
-                    prefixes = _tracer_prefixes(tr)
-                    mask = tracer_series.str.startswith(prefixes)
-                    if not mask.any():
-                        continue
-                    subset = r_df.loc[mask]
-                    if subset.empty:
-                        continue
-                    tracer_state[tr]['real'].add(subset.loc[subset['ISDATA'], 'r'].to_numpy(dtype=float, copy=False))
-                    tracer_state[tr]['rand'].add(subset.loc[~subset['ISDATA'], 'r'].to_numpy(dtype=float, copy=False))
-
-        packed = {}
-        for tr in tracers:
-            packed[tr] = {
-                'real': {'counts': tracer_state[tr]['real'].counts.copy(),
-                         'total': tracer_state[tr]['real'].total},
-                'rand': {'counts': tracer_state[tr]['rand'].counts.copy(),
-                         'total': tracer_state[tr]['rand'].total}
-            }
-        return {'tracers': packed}
+    dispersion_data = {'xgrid': xgrid,
+                       'xbins': xbins,
+                       'zones': list(zones),
+                       'tracers': {}}
 
     def _state_to_cdf(state_part):
         if not state_part:
@@ -1148,7 +1107,7 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
 
         entry_map = {entry['tag']: entry for entry in entries}
         selected_entries = [entry_map[tag] for tag in tag_list if tag in entry_map]
-        usable_entries = [entry for entry in selected_entries if entry.get('has_class')]
+        usable_entries = [entry for entry in selected_entries if entry.get('has_class') and entry.get('has_raw')]
 
         if not usable_entries:
             if progress:
@@ -1156,15 +1115,80 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
                 print(f'[cdf-disp] zone {z}: skipped (missing raw/class files for tags {pretty_tags})')
             continue
 
-        cache_key = f"{_zone_cache_key('cdf_counts', z, tag_list)}_xb{xbins}"
-        source_paths = []
-        for entry in usable_entries:
-            for cls_path, _ in _entry_class_paths(entry):
-                source_paths.append(cls_path)
+        cache_key = f"{_zone_cache_key('cdf_counts', z, tag_list)}_xb{xbins}_{CDF_COUNTS_VERSION}"
+        raw_paths = [entry['raw'] for entry in usable_entries if entry.get('raw')]
+        raw_tags = [entry['tag'] for entry in usable_entries if entry.get('raw')]
+        cls_paths = [entry['class'] for entry in usable_entries if entry.get('class')]
+        class_tags = [entry['tag'] for entry in usable_entries if entry.get('class')]
 
-        state = _load_or_build_df(cache_dir, cache_key, source_paths,
-                                   lambda z=z, entries=usable_entries: _build_zone_cdf_state(z, entries),
-                                   progress=progress)
+        def _build_zone_cdf_state():
+            tracer_state = {tr: {'real': _CDFSeriesAccumulator(xgrid),
+                                 'rand': _CDFSeriesAccumulator(xgrid)}
+                            for tr in tracers}
+
+            if not raw_paths or not cls_paths:
+                return {'tracers': {}}
+
+            raw_df = _load_or_build_df(cache_dir, _zone_cache_key('raw', z, raw_tags), raw_paths,
+                                       lambda: _concat_existing(raw_paths, load_raw_df), progress=progress)
+            _sanitize_tracer_columns(raw_df)
+            if raw_df.empty or 'TARGETID' not in raw_df.columns or 'ISDATA' not in raw_df.columns:
+                return {'tracers': {}}
+
+            data_target_ids = set(raw_df.loc[raw_df['ISDATA'], 'TARGETID'].to_numpy(dtype=np.int64))
+
+            cls_loader = lambda: _concat_existing(
+                cls_paths,
+                lambda p: load_class_df(p,
+                                        target_ids=data_target_ids,
+                                        chunk_rows=CLASS_LOAD_OPTIONS.get('chunk_rows')))
+
+            cls_full = _load_or_build_df(cache_dir, _zone_cache_key('class', z, class_tags), cls_paths,
+                                         cls_loader, progress=progress)
+            if cls_full is None or cls_full.empty:
+                return {'tracers': {}}
+
+            if 'ISDATA' in cls_full.columns:
+                cls_df = cls_full[cls_full['ISDATA'] == True]
+            else:
+                cls_df = cls_full
+
+            def _build_r():
+                merged = raw_df.merge(cls_df[['TARGETID', 'NDATA', 'NRAND']], on='TARGETID', how='left')
+                return compute_r(merged)
+
+            r_df = _load_or_build_df(cache_dir, _zone_cache_key('r', z, raw_tags), raw_paths + cls_paths,
+                                     _build_r, progress=progress)
+            _sanitize_tracer_columns(r_df)
+            if r_df is None or r_df.empty:
+                return {'tracers': {}}
+            if 'TRACERTYPE' not in r_df.columns or 'ISDATA' not in r_df.columns or 'r' not in r_df.columns:
+                return {'tracers': {}}
+
+            tracer_series = r_df['TRACERTYPE'].astype(str)
+            for tr in tracers:
+                prefixes = _tracer_prefixes(tr)
+                mask = tracer_series.str.startswith(prefixes)
+                if not mask.any():
+                    continue
+                subset = r_df.loc[mask]
+                if subset.empty:
+                    continue
+                tracer_state[tr]['real'].add(subset.loc[subset['ISDATA'], 'r'].to_numpy(dtype=float, copy=False))
+                tracer_state[tr]['rand'].add(subset.loc[~subset['ISDATA'], 'r'].to_numpy(dtype=float, copy=False))
+
+            packed = {}
+            for tr in tracers:
+                packed[tr] = {
+                    'real': {'counts': tracer_state[tr]['real'].counts.copy(),
+                             'total': tracer_state[tr]['real'].total},
+                    'rand': {'counts': tracer_state[tr]['rand'].counts.copy(),
+                             'total': tracer_state[tr]['rand'].total}
+                }
+            return {'tracers': packed}
+
+        state = _load_or_build_df(cache_dir, cache_key, raw_paths + cls_paths,
+                                   _build_zone_cdf_state, progress=progress)
         tracer_state = (state or {}).get('tracers', {})
 
         for tr in tracers:
@@ -1184,6 +1208,8 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
     for tr in tracers:
         color = _tracer_color(tr)
         display = _tracer_display_name(tr)
+        tracer_data = {'n_real_samples': len(per_tracer_real[tr]),
+                       'n_rand_samples': len(per_tracer_rand[tr])}
 
         if len(per_tracer_real[tr]) > 0:
             Y = np.vstack(per_tracer_real[tr])
@@ -1194,6 +1220,7 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
             ax.plot(xgrid, p50, linewidth=1.5, color=color, label=f'{display} real median', zorder=10)
             ax.plot(xgrid, p16, linewidth=0.7, color=color, linestyle=':', zorder=8)
             ax.plot(xgrid, p84, linewidth=0.7, color=color, linestyle=':', zorder=8)
+            tracer_data['real'] = {'p16': p16, 'p50': p50, 'p84': p84}
 
         if len(per_tracer_rand[tr]) > 0:
             Y = np.vstack(per_tracer_rand[tr])
@@ -1204,26 +1231,34 @@ def plot_cdf_dispersion(raw_dir, class_dir, zones, out_dir, tracers=None, xbins=
             ax.plot(xgrid, p50, linewidth=1.2, linestyle='--', color=color, label=f'{display} rand median', zorder=10)
             ax.plot(xgrid, p16, linewidth=0.6, color=color, linestyle='--', dashes=(4,2), zorder=8)
             ax.plot(xgrid, p84, linewidth=0.6, color=color, linestyle='--', dashes=(4,2), zorder=8)
+            tracer_data['rand'] = {'p16': p16, 'p50': p50, 'p84': p84}
+        dispersion_data['tracers'][tr] = tracer_data
 
     ax.set_ylabel('CDF')
     ax.set_xlabel(r"$r = \frac{N_{\mathrm{data}} - N_{\mathrm{rand}}}{N_{\mathrm{data}} + N_{\mathrm{rand}}}$")
     ax.set_title('Dispersion of CDF across zones', fontsize=16, color=TEXT_COLOR)
-    leg = ax.legend(fontsize=9, ncol=2)
-    if leg:
-        for text in leg.get_texts():
-            text.set_color(TEXT_COLOR)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        leg = ax.legend(fontsize=9, ncol=2)
+        if leg:
+            for text in leg.get_texts():
+                text.set_color(TEXT_COLOR)
 
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, 'cdf/cdf_dispersion_zones.png')
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fig.savefig(path, dpi=PLOT_DPI)
+    cdf_dir = os.path.join(out_dir, 'cdf')
+    os.makedirs(cdf_dir, exist_ok=True)
+    fig.savefig(os.path.join(cdf_dir, 'cdf_dispersion_zones.png'), dpi=PLOT_DPI)
+
+    pkl_path = os.path.join(cdf_dir, 'cdf_dispersion_zones.pkl')
+    with open(pkl_path, 'wb') as handle:
+        pickle.dump(dispersion_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
     plt.close(fig)
 
 
 def entropy(df):
     """
     Compute the Shannon entropy for each row in the DataFrame.
-    
+
     Args:
         df (pd.DataFrame): The input DataFrame containing probability columns.
     Returns:
@@ -1267,6 +1302,54 @@ def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25, cach
     bin_widths = np.diff(bin_edges)
 
     per_tracer_hist = {tr: [] for tr in tracers}
+    raw_tracer_map_cache = {}
+
+    def _canonical_tracer_name(value):
+        text = _coerce_text(value).strip()
+        key = _tracer_key(text)
+        if key in ('BGS_BRIGHT', 'BGS_ANY'):
+            return 'BGS'
+        if key == 'ELG_LOPNOTQSO':
+            return 'ELG'
+        return key
+
+    def _entry_tag_matches_tracer(entry_tag, tracer):
+        tag = str(entry_tag or '').strip().upper()
+        if not tag:
+            return False
+        prefixes = tuple(str(p).upper() for p in _tracer_prefixes(tracer) if str(p).strip())
+        if not prefixes:
+            return False
+        return any(tag.startswith(pref) or pref.startswith(tag) for pref in prefixes)
+
+    def _load_raw_target_tracer_map(zone, entry):
+        raw_path = entry.get('raw')
+        if not raw_path or not os.path.exists(raw_path):
+            return None
+        if raw_path in raw_tracer_map_cache:
+            return raw_tracer_map_cache[raw_path]
+
+        def _loader():
+            raw_df = load_raw_df(raw_path)
+            if raw_df.empty or 'TARGETID' not in raw_df.columns or 'TRACERTYPE' not in raw_df.columns:
+                return pd.DataFrame(columns=['TARGETID', 'TRACERTYPE'])
+            if 'ISDATA' in raw_df.columns:
+                raw_df = raw_df[raw_df['ISDATA'] == True]
+            view = raw_df[['TARGETID', 'TRACERTYPE']].dropna(subset=['TARGETID'])
+            if view.empty:
+                return pd.DataFrame(columns=['TARGETID', 'TRACERTYPE'])
+            view = view.drop_duplicates(subset=['TARGETID'], keep='first')
+            view['TARGETID'] = view['TARGETID'].astype(np.int64, copy=False)
+            return view
+
+        if cache_dir:
+            key_bits = [entry.get('tag') or 'combined', os.path.basename(raw_path)]
+            cache_key = _zone_cache_key('raw_tracer_map', zone, key_bits)
+            tracer_map = _load_or_build_df(cache_dir, cache_key, [raw_path], _loader, progress=progress)
+        else:
+            tracer_map = _loader()
+        raw_tracer_map_cache[raw_path] = tracer_map
+        return tracer_map
 
     def _build_zone_entropy_state(zone, usable_entries):
         tracer_state = {tr: {'counts': np.zeros(len(bin_edges) - 1, dtype=float),
@@ -1291,6 +1374,21 @@ def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25, cach
             if probs_df.empty or 'H' not in probs_df.columns:
                 continue
 
+            if 'TRACERTYPE' not in probs_df.columns:
+                tracer_map = _load_raw_target_tracer_map(zone, entry)
+                if isinstance(tracer_map, pd.DataFrame) and (not tracer_map.empty) and ('TARGETID' in probs_df.columns):
+                    probs_df = probs_df.merge(tracer_map, on='TARGETID', how='left', copy=False)
+            elif 'ISDATA' not in probs_df.columns:
+                tracer_map = _load_raw_target_tracer_map(zone, entry)
+                if isinstance(tracer_map, pd.DataFrame) and (not tracer_map.empty) and ('TARGETID' in probs_df.columns):
+                    align = tracer_map.rename(columns={'TRACERTYPE': 'TRACERTYPE_RAW'})
+                    probs_df = probs_df.merge(align, on='TARGETID', how='left', copy=False)
+                    if 'TRACERTYPE_RAW' in probs_df.columns:
+                        left = probs_df['TRACERTYPE'].map(_canonical_tracer_name)
+                        right = probs_df['TRACERTYPE_RAW'].map(_canonical_tracer_name)
+                        probs_df = probs_df[left == right]
+                        probs_df = probs_df.drop(columns=['TRACERTYPE_RAW'])
+
             _sanitize_tracer_columns(probs_df)
             tracer_series = probs_df['TRACERTYPE'].astype(str) if 'TRACERTYPE' in probs_df.columns else None
 
@@ -1298,9 +1396,15 @@ def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25, cach
                 if tracer_series is not None:
                     prefixes = _tracer_prefixes(tracer)
                     mask = tracer_series.str.startswith(prefixes)
-                else:
+                    subset = probs_df.loc[mask]
+                elif _entry_tag_matches_tracer(entry.get('tag'), tracer):
                     mask = slice(None)
-                subset = probs_df.loc[mask] if isinstance(mask, pd.Series) else probs_df
+                    subset = probs_df
+                elif len(tracers) == 1:
+                    mask = slice(None)
+                    subset = probs_df
+                else:
+                    continue
                 if subset.empty:
                     continue
                 values = subset['H'].to_numpy(dtype=float, copy=False)
@@ -1405,11 +1509,11 @@ def plot_pdf_entropy(raw_dir, class_dir, zones, tracers, out_path, bins=25, cach
 def _process_zone(zone, config):
     """
     Process a single zone: load data, compute r, and generate requested plots.
-    
+
     Args:
         zone (int): Zone identifier.
         config (dict): Configuration dictionary with keys:
-    Returns:     
+    Returns:
         dict: Summary of processing results.
     """
     tags_map = config['tags_map']
@@ -1530,9 +1634,9 @@ def _process_zone(zone, config):
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr2/raw')
-    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/dr2/classification')
-    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/dr2/figs/')
+    p.add_argument('--raw-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/raw')
+    p.add_argument('--class-dir', default='/pscratch/sd/v/vtorresg/cosmic-web/edr')
+    p.add_argument('--output', default='/pscratch/sd/v/vtorresg/cosmic-web/edr/figs/')
 
     p.add_argument('--zones', nargs='+', default=None)
     p.add_argument('--bins', type=int, default=10)

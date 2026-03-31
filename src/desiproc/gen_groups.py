@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 from astropy.table import Table
-from scipy.spatial import ConvexHull, QhullError
 from sklearn.cluster import DBSCAN
 
 if __package__ is None or __package__ == '':
@@ -20,16 +19,20 @@ if __package__ is None or __package__ == '':
     if str(parent_root) not in sys.path:
         sys.path.append(str(parent_root))
     from implement_astra import TempTableStore
-    from paths import locate_classification_file, safe_tag, zone_tag
+    from paths import locate_classification_file, locate_probability_file, safe_tag, zone_tag
 else:
     from .implement_astra import TempTableStore
-    from .paths import locate_classification_file, safe_tag, zone_tag
+    from .paths import locate_classification_file, locate_probability_file, safe_tag, zone_tag
 
 
 RAW_COLS = ['TRACERTYPE','TRACER_ID','RANDITER','TARGETID','XCART','YCART','ZCART']
 CLASS_COLS = ['TARGETID','RANDITER','ISDATA','NDATA','NRAND','TRACERTYPE','TRACER_ID']
+PROB_COLS = ['TARGETID','TRACERTYPE','PVOID','PSHEET','PFILAMENT','PKNOT']
 WEBTYPE_MAPPING = np.array(['void', 'sheet', 'filament', 'knot'], dtype='U8')
-HULL_SAMPLE_CAP = int(os.environ.get('ASTRA_GROUPS_HULL_CAP', '50000'))
+try:
+    LINKING_SCALE = float(os.environ.get('ASTRA_GROUPS_LINK_B', '0.4'))
+except Exception:
+    LINKING_SCALE = 0.4
 _GROUP_TRACER_DTYPE = 'S32'
 _GROUP_WEBTYPE_DTYPE = 'S8'
 _GROUP_ROW_DTYPE = np.dtype([('TRACERTYPE', _GROUP_TRACER_DTYPE),
@@ -116,7 +119,8 @@ def _normalize_tracer_array(values):
         np.ndarray: Array of normalised tracer prefixes.
     """
     arr = np.asarray(values).astype('U32', copy=False)
-    head, sep, tail = np.char.rpartition(arr, '_')
+    parts = np.char.rpartition(arr, '_')
+    head, sep, tail = parts[..., 0], parts[..., 1], parts[..., 2]
     mask = (sep != '') & np.isin(np.char.upper(tail), ('DATA', 'RAND'))
     result = arr.copy()
     if np.any(mask):
@@ -141,7 +145,10 @@ def _compute_tracer_codes(raw_labels, sel_labels):
     sel_unique, sel_inverse = np.unique(sel_base, return_inverse=True)
 
     lookup = np.searchsorted(raw_unique, sel_unique)
-    matched = (lookup < raw_unique.size) & (raw_unique[lookup] == sel_unique)
+    matched = np.zeros(sel_unique.size, dtype=bool)
+    valid = lookup < raw_unique.size
+    if np.any(valid):
+        matched[valid] = (raw_unique[lookup[valid]] == sel_unique[valid])
     sel_code_map = np.full(sel_unique.size, -1, dtype=np.int32)
     sel_code_map[matched] = lookup[matched]
     sel_codes = sel_code_map[sel_inverse]
@@ -165,7 +172,7 @@ def classify_by_probability(prob_tbl):
     if not isinstance(prob_tbl, Table):
         raise TypeError('classify_by_probability expects an astropy Table')
 
-    required = ('PVOID', 'PSHEET', 'PFILAMENT', 'PKNOT')
+    required = ('PVOID', 'PSHEET', 'PFILAMENT')
     missing = [col for col in required if col not in prob_tbl.colnames]
     if missing:
         raise KeyError(f'Probability table missing columns: {missing}')
@@ -178,8 +185,13 @@ def classify_by_probability(prob_tbl):
         prob_tbl['WEBTYPE'] = np.empty(0, dtype='U8')
         return prob_tbl
 
+    score_cols = list(required)
+    has_pknot = 'PKNOT' in prob_tbl.colnames
+    if has_pknot:
+        score_cols.append('PKNOT')
+
     cols = []
-    for name in required:
+    for name in score_cols:
         data = prob_tbl[name]
         if isinstance(data, np.ma.MaskedArray):
             values = data.filled(np.nan)
@@ -188,6 +200,8 @@ def classify_by_probability(prob_tbl):
         cols.append(np.asarray(values, dtype=np.float64))
 
     arr = np.column_stack(cols)
+    if not has_pknot:
+        arr = np.column_stack((arr, np.zeros(n_rows, dtype=np.float64)))
     arr = np.nan_to_num(arr, nan=-np.inf, copy=False)
     idx = np.argmax(arr, axis=1)
     webtypes = WEBTYPE_MAPPING[idx].astype('U8', copy=False)
@@ -259,6 +273,29 @@ def _read_fits_columns(path, cols):
     return Table(subset, copy=False)
 
 
+def _locate_raw_path(raw_dir, zone, out_tag=None):
+    """
+    Find the raw catalogue for a zone (either .fits.gz or .fits).
+
+    Args:
+        raw_dir (str): Directory containing raw data files.
+        zone (int or str): Zone number (int) or label (str).
+        out_tag (str or None): Optional tag to append to filenames.
+    Returns:
+        str: Path to the raw FITS table.
+    Raises:
+        FileNotFoundError: If no matching file exists.
+    """
+    ztag = zone_tag(zone)
+    tsuf = safe_tag(out_tag)
+    raw_base = os.path.join(raw_dir, f'zone_{ztag}{tsuf}')
+    raw_candidates = (f'{raw_base}.fits.gz', f'{raw_base}.fits')
+    for raw_path in raw_candidates:
+        if os.path.exists(raw_path):
+            return raw_path
+    raise FileNotFoundError(f'Raw table not found for zone {zone} with tag {out_tag}')
+
+
 def _get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     """
     Get file paths for a given zone number or label.
@@ -271,18 +308,26 @@ def _get_zone_paths(raw_dir, class_dir, zone, out_tag=None):
     Returns:
         Tuple[str, str]: Paths to the raw and classification files for the zone.
     """
-    ztag = zone_tag(zone)
-    tsuf = safe_tag(out_tag)
-    raw_base = os.path.join(raw_dir, f'zone_{ztag}{tsuf}')
-    raw_candidates = (f'{raw_base}.fits.gz', f'{raw_base}.fits')
-    for raw_path in raw_candidates:
-        if os.path.exists(raw_path):
-            break
-    else:
-        raise FileNotFoundError(f'Raw table not found for zone {zone} with tag {out_tag}')
-
+    raw_path = _locate_raw_path(raw_dir, zone, out_tag=out_tag)
     class_path = locate_classification_file(class_dir, zone, out_tag)
     return raw_path, class_path
+
+
+def _get_probability_paths(raw_dir, class_dir, zone, out_tag=None):
+    """
+    Get file paths for the raw and probability tables for a zone.
+
+    Args:
+        raw_dir (str): Directory containing raw data files.
+        class_dir (str): Directory containing classification/probability data files.
+        zone (int or str): Zone number (int) or label (str).
+        out_tag (str or None): Optional tag to append to filenames.
+    Returns:
+        Tuple[str, str]: Paths to the raw and probability files for the zone.
+    """
+    raw_path = _locate_raw_path(raw_dir, zone, out_tag=out_tag)
+    prob_path = locate_probability_file(class_dir, zone, out_tag)
+    return raw_path, prob_path
 
 
 def _read_zone_tables(raw_path, class_path):
@@ -298,6 +343,81 @@ def _read_zone_tables(raw_path, class_path):
     raw = _read_fits_columns(raw_path, RAW_COLS)
     cls = _read_fits_columns(class_path, CLASS_COLS)
     return raw, cls
+
+
+def _align_selection_with_raw(raw_tbl, sel_tbl):
+    """
+    Align selected rows with the raw table by ``TARGETID``, ``RANDITER`` and tracer.
+
+    Args:
+        raw_tbl (Table): Raw table containing coordinates.
+        sel_tbl (Table): Filtered classification/probability rows.
+    Returns:
+        tuple | None: Tuple ``(tids, randiters, isdata, tracers, raw_indices)`` or
+        ``None`` when no matches are found.
+    """
+    if len(sel_tbl) == 0 or len(raw_tbl) == 0:
+        return None
+
+    isdata_sel = np.asarray(sel_tbl['ISDATA'], dtype=bool)
+    rand_sel = np.asarray(sel_tbl['RANDITER'], dtype=np.int32)
+    rand_sel = np.where(isdata_sel, -1, rand_sel)
+    tid_sel = np.asarray(sel_tbl['TARGETID'], dtype=np.int64)
+    tracer_labels = np.asarray(sel_tbl['TRACERTYPE']).astype('U32')
+
+    raw_tid = np.asarray(raw_tbl['TARGETID'], dtype=np.int64)
+    raw_iter = np.asarray(raw_tbl['RANDITER'], dtype=np.int32)
+
+    if 'TRACER_ID' in raw_tbl.colnames and 'TRACER_ID' in sel_tbl.colnames:
+        raw_tracer_codes = np.asarray(raw_tbl['TRACER_ID'], dtype=np.int32)
+        sel_tracer_codes = np.asarray(sel_tbl['TRACER_ID'], dtype=np.int32)
+    else:
+        raw_tracer_codes, sel_tracer_codes = _compute_tracer_codes(raw_tbl['TRACERTYPE'],
+                                                                   sel_tbl['TRACERTYPE'])
+
+    key_dtype = np.dtype([('TARGETID', np.int64),
+                          ('RANDITER', np.int32),
+                          ('TRACER', np.int32)])
+
+    raw_keys = np.empty(raw_tid.size, dtype=key_dtype)
+    raw_keys['TARGETID'] = raw_tid
+    raw_keys['RANDITER'] = raw_iter
+    raw_keys['TRACER'] = raw_tracer_codes
+
+    sel_keys = np.empty(tid_sel.size, dtype=key_dtype)
+    sel_keys['TARGETID'] = tid_sel
+    sel_keys['RANDITER'] = rand_sel
+    sel_keys['TRACER'] = sel_tracer_codes
+
+    sorter = np.argsort(raw_keys, order=('TARGETID', 'RANDITER', 'TRACER'))
+    raw_sorted = raw_keys[sorter]
+
+    pos = np.searchsorted(raw_sorted, sel_keys)
+    within = pos < raw_sorted.size
+    keep = np.zeros(sel_keys.size, dtype=bool)
+    if np.any(within):
+        matches = raw_sorted[pos[within]] == sel_keys[within]
+        if np.any(matches):
+            keep_indices = np.where(within)[0][matches]
+            keep[keep_indices] = True
+
+    if not np.any(keep):
+        return None
+
+    if not np.all(keep):
+        tid_sel = tid_sel[keep]
+        rand_sel = rand_sel[keep]
+        isdata_sel = isdata_sel[keep]
+        tracer_labels = tracer_labels[keep]
+        sel_keys = sel_keys[keep]
+
+    matched_indices = sorter[pos[keep]]
+
+    return (tid_sel,
+            rand_sel.astype(np.int32, copy=False),
+            isdata_sel,
+            tracer_labels,
+            matched_indices)
 
 
 def _split_blocks(tracer_labels, randiters):
@@ -327,99 +447,50 @@ def _split_blocks(tracer_labels, randiters):
         yield tr_sorted[start], int(ri_sorted[start]), idxs
 
 
-def _max_pairwise_distance(coords, block_size=2048):
+def length(data_raw, link_scale=None, **_unused):
     """
-    Compute the maximum pairwise distance without building a dense NxN array.
-
-    Args:
-        coords (np.ndarray): Array with shape (N, 3).
-        block_size (int): Number of points processed per block.
-    Returns:
-        float: Maximum Euclidean distance between any two points.
-    """
-    npts = coords.shape[0]
-    if npts <= 1:
-        return 0.0
-
-    coords64 = coords.astype(np.float64, copy=False)
-    max_dist2 = 0.0
-
-    for i_start in range(0, npts, block_size):
-        i_end = min(i_start + block_size, npts)
-        block_i = coords64[i_start:i_end]
-        norm_i = np.sum(block_i * block_i, axis=1)
-
-        for j_start in range(i_start, npts, block_size):
-            j_end = min(j_start + block_size, npts)
-            block_j = coords64[j_start:j_end]
-            norm_j = np.sum(block_j * block_j, axis=1)
-
-            cross = np.dot(block_i, block_j.T)
-            dist2 = norm_i[:, None] + norm_j[None, :] - 2.0 * cross
-            np.maximum(dist2, 0.0, out=dist2)
-
-            if j_start == i_start:
-                if dist2.shape[0] < 2:
-                    continue
-                tri_mask = np.triu_indices(dist2.shape[0], k=1)
-                block_max = float(np.max(dist2[tri_mask]))
-            else:
-                block_max = float(np.max(dist2))
-
-            if block_max > max_dist2:
-                max_dist2 = block_max
-
-    return float(np.sqrt(max_dist2)) if max_dist2 > 0 else 0.0
-
-
-def length(data_raw, hull_cap=None, rng_seed=0):
-    """
-    Estimate a linking length based on the convex hull of the points.
+    Estimate a linking length from the analytic bounding-box volume.
     
     Args:
         data_raw (Table): Table containing the raw data with 'XCART', 'YCART', 'ZCART' columns.
+        link_scale (float, optional): Multiplicative FoF ``b`` parameter. Defaults to
+            the ``ASTRA_GROUPS_LINK_B`` environment variable (or 0.5).
     Returns:
-        float: Estimated linking length, or 0.0 if it cannot be computed.
+        float: Estimated linking length (lower-bounded by machine epsilon).
     """
-    x_all = np.asarray(data_raw['XCART'])
-    y_all = np.asarray(data_raw['YCART'])
-    z_all = np.asarray(data_raw['ZCART'])
+    x_all = np.asarray(data_raw['XCART'], dtype=np.float64)
+    y_all = np.asarray(data_raw['YCART'], dtype=np.float64)
+    z_all = np.asarray(data_raw['ZCART'], dtype=np.float64)
 
     npts = x_all.size
-    if npts <= 1:
+    if npts <= 0:
         return float(np.finfo(np.float32).eps)
 
-    cap = HULL_SAMPLE_CAP if hull_cap is None else hull_cap
-    idx = None
-    if cap and npts > cap:
-        rs = np.random.RandomState(rng_seed)
-        idx = rs.choice(npts, size=cap, replace=False)
+    dx = float(np.max(x_all) - np.min(x_all))
+    dy = float(np.max(y_all) - np.min(y_all))
+    dz = float(np.max(z_all) - np.min(z_all))
 
-    if idx is None:
-        sample = np.column_stack((x_all, y_all, z_all)).astype(np.float32, copy=False)
+    extents = np.array([dx, dy, dz], dtype=np.float64)
+    extents = np.where(np.isfinite(extents), extents, 0.0)
+    extents = np.maximum(extents, np.finfo(np.float64).eps)
+
+    volume = float(np.prod(extents))
+    if not np.isfinite(volume) or volume <= 0.0:
+        return float(np.finfo(np.float32).eps)
+
+    mean_sep = float(np.cbrt(volume / float(npts)))
+    scale = LINKING_SCALE if link_scale is None else float(link_scale)
+    if not np.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+
+    link_len = float(scale * mean_sep)
+    min_eps = float(np.finfo(np.float32).eps)
+    if not np.isfinite(link_len) or link_len <= 0.0:
+        link_len = min_eps
     else:
-        sample = np.column_stack((x_all[idx], y_all[idx], z_all[idx])).astype(np.float32, copy=False)
+        link_len = max(link_len, min_eps)
 
-    try:
-        hull = ConvexHull(sample)
-        vol = float(hull.volume)
-    except QhullError:
-        dx = float(np.max(x_all) - np.min(x_all))
-        dy = float(np.max(y_all) - np.min(y_all))
-        dz = float(np.max(z_all) - np.min(z_all))
-        diag_full = np.sqrt(dx*dx + dy*dy + dz*dz)
-        dist_sample = _max_pairwise_distance(sample)
-        return float(max(dist_sample, diag_full, np.finfo(np.float32).eps))
-
-    if vol <= 0:
-        dx = float(np.max(x_all) - np.min(x_all))
-        dy = float(np.max(y_all) - np.min(y_all))
-        dz = float(np.max(z_all) - np.min(z_all))
-        diag_full = np.sqrt(dx*dx + dy*dy + dz*dz)
-        dist_sample = _max_pairwise_distance(sample)
-        return float(max(dist_sample, diag_full, np.finfo(np.float32).eps))
-
-    return float(np.cbrt(vol / float(npts)))
+    return link_len
 
 
 def _dbscan_labels(coords, eps):
@@ -622,6 +693,11 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
     """
     Generate group catalogues for a zone.
 
+    Filaments are selected from the probability catalogue by taking the rows where
+    ``PFILAMENT`` is the highest probability. Voids (and other web types) keep the
+    original ratio-based classification and are grouped per iteration, retaining
+    the ``RANDITER`` information in the output.
+
     Args:
         zone (int | str): Zone identifier to process.
         raw_dir (str): Directory containing raw catalogues.
@@ -637,89 +713,73 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
         list[str]: Paths to generated groups FITS files. Empty when no objects
         meet the criteria.
     """
-    raw_path, class_path = _get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
-    raw_tbl, class_tbl = _read_zone_tables(raw_path, class_path)
+    use_probabilities = (webtype == 'filament')
 
-    if len(class_tbl) == 0:
-        return []
+    def _apply_source_mask(mask, isdata_flags):
+        """
+        Apply data/rand filtering to a boolean mask.
+        """
+        if source == 'data':
+            return mask & isdata_flags
+        if source == 'rand':
+            return mask & ~isdata_flags
+        return mask
 
-    r_num = np.asarray(class_tbl['NDATA'], dtype=np.float64) - np.asarray(class_tbl['NRAND'], dtype=np.float64)
-    r_den = np.asarray(class_tbl['NDATA'], dtype=np.float64) + np.asarray(class_tbl['NRAND'], dtype=np.float64)
-    r_val = np.full(len(class_tbl), np.nan, dtype=np.float64)
-    np.divide(r_num, r_den, out=r_val, where=(r_den > 0))
+    if use_probabilities:
+        raw_path, prob_path = _get_probability_paths(raw_dir, class_dir, zone, out_tag=out_tag)
+        raw_tbl = _read_fits_columns(raw_path, RAW_COLS)
+        prob_tbl = _read_fits_columns(prob_path, PROB_COLS)
 
-    valid = np.isfinite(r_val)
-    bins = np.array([r_lower, 0.0, r_upper], dtype=float)
-    webtypes = np.full(len(class_tbl), '', dtype='U8')
-    if np.any(valid):
-        idx = np.clip(np.digitize(r_val[valid], bins, right=False), 0, 3)
-        webtypes_valid = WEBTYPE_MAPPING[idx]
-        webtypes[valid] = webtypes_valid
+        if len(prob_tbl) == 0:
+            return []
 
-    isdata_cls = np.asarray(class_tbl['ISDATA'], dtype=bool)
-    mask = valid & (webtypes == webtype)
-    if source == 'data':
-        mask &= isdata_cls
-    elif source == 'rand':
-        mask &= ~isdata_cls
-
-    if not np.any(mask):
-        return []
-
-    class_sel = class_tbl[mask]
-    isdata_sel = np.asarray(class_sel['ISDATA'], dtype=bool)
-    rand_sel = np.asarray(class_sel['RANDITER'], dtype=np.int32)
-    rand_sel = np.where(isdata_sel, -1, rand_sel)
-    tid_sel = np.asarray(class_sel['TARGETID'], dtype=np.int64)
-    tracer_labels = np.asarray(class_sel['TRACERTYPE']).astype('U32')
-
-    raw_tid = np.asarray(raw_tbl['TARGETID'], dtype=np.int64)
-    raw_iter = np.asarray(raw_tbl['RANDITER'], dtype=np.int32)
-
-    if 'TRACER_ID' in raw_tbl.colnames and 'TRACER_ID' in class_sel.colnames:
-        raw_tracer_codes = np.asarray(raw_tbl['TRACER_ID'], dtype=np.int32)
-        sel_tracer_codes = np.asarray(class_sel['TRACER_ID'], dtype=np.int32)
+        prob_tbl = classify_by_probability(prob_tbl)
+        if 'RANDITER' not in prob_tbl.colnames:
+            prob_tbl['RANDITER'] = np.full(len(prob_tbl), -1, dtype=np.int32)
+        if 'ISDATA' not in prob_tbl.colnames:
+            if 'RANDITER' in prob_tbl.colnames:
+                prob_tbl['ISDATA'] = np.asarray(prob_tbl['RANDITER'], dtype=np.int32) == -1
+            else:
+                prob_tbl['ISDATA'] = np.ones(len(prob_tbl), dtype=bool)
+        webtypes = np.asarray(prob_tbl['WEBTYPE'], dtype='U8')
+        isdata_flags = np.asarray(prob_tbl['ISDATA'], dtype=bool)
+        mask = _apply_source_mask(webtypes == 'filament', isdata_flags)
+        if not np.any(mask):
+            return []
+        sel_tbl = prob_tbl[mask]
     else:
-        raw_tracer_codes, sel_tracer_codes = _compute_tracer_codes(raw_tbl['TRACERTYPE'],
-                                                                   class_sel['TRACERTYPE'])
+        raw_path, class_path = _get_zone_paths(raw_dir, class_dir, zone, out_tag=out_tag)
+        raw_tbl, class_tbl = _read_zone_tables(raw_path, class_path)
 
-    key_dtype = np.dtype([('TARGETID', np.int64),
-                          ('RANDITER', np.int32),
-                          ('TRACER', np.int32)])
+        if len(class_tbl) == 0:
+            return []
 
-    raw_keys = np.empty(raw_tid.size, dtype=key_dtype)
-    raw_keys['TARGETID'] = raw_tid
-    raw_keys['RANDITER'] = raw_iter
-    raw_keys['TRACER'] = raw_tracer_codes
+        r_num = np.asarray(class_tbl['NDATA'], dtype=np.float64) - np.asarray(class_tbl['NRAND'], dtype=np.float64)
+        r_den = np.asarray(class_tbl['NDATA'], dtype=np.float64) + np.asarray(class_tbl['NRAND'], dtype=np.float64)
+        r_val = np.full(len(class_tbl), np.nan, dtype=np.float64)
+        np.divide(r_num, r_den, out=r_val, where=(r_den > 0))
 
-    sel_keys = np.empty(tid_sel.size, dtype=key_dtype)
-    sel_keys['TARGETID'] = tid_sel
-    sel_keys['RANDITER'] = rand_sel
-    sel_keys['TRACER'] = sel_tracer_codes
+        valid = np.isfinite(r_val)
+        bins = np.array([r_lower, 0.0, r_upper], dtype=float)
+        webtypes = np.full(len(class_tbl), '', dtype='U8')
+        if np.any(valid):
+            idx = np.clip(np.digitize(r_val[valid], bins, right=False), 0, 3)
+            webtypes_valid = WEBTYPE_MAPPING[idx]
+            webtypes[valid] = webtypes_valid
 
-    sorter = np.argsort(raw_keys, order=('TARGETID', 'RANDITER', 'TRACER'))
-    raw_sorted = raw_keys[sorter]
+        isdata_flags = np.asarray(class_tbl['ISDATA'], dtype=bool)
+        mask = _apply_source_mask(valid & (webtypes == webtype), isdata_flags)
 
-    pos = np.searchsorted(raw_sorted, sel_keys)
-    within = pos < raw_sorted.size
-    keep = np.zeros(sel_keys.size, dtype=bool)
-    if np.any(within):
-        matches = raw_sorted[pos[within]] == sel_keys[within]
-        if np.any(matches):
-            keep_indices = np.where(within)[0][matches]
-            keep[keep_indices] = True
+        if not np.any(mask):
+            return []
 
-    if not np.any(keep):
+        sel_tbl = class_tbl[mask]
+
+    aligned = _align_selection_with_raw(raw_tbl, sel_tbl)
+    if aligned is None:
         return []
 
-    if not np.all(keep):
-        tid_sel = tid_sel[keep]
-        rand_sel = rand_sel[keep]
-        isdata_sel = isdata_sel[keep]
-        tracer_labels = tracer_labels[keep]
-        sel_keys = sel_keys[keep]
-
-    matched_indices = sorter[pos[keep]]
+    tid_sel, rand_sel, isdata_sel, tracer_labels, matched_indices = aligned
 
     x_raw = np.array(raw_tbl['XCART'], copy=False)
     y_raw = np.array(raw_tbl['YCART'], copy=False)
@@ -782,7 +842,7 @@ def _default_zones_for_release(release_tag):
 
 
 def parse_args():
-    release_default = os.environ.get('RELEASE', 'dr2_res')
+    release_default = os.environ.get('RELEASE', 'dr1')
 
     p = argparse.ArgumentParser()
     p.add_argument('--raw-dir', default=os.path.join('/pscratch/sd/v/vtorresg/cosmic-web', release_default, 'raw'),
@@ -793,11 +853,11 @@ def parse_args():
                    help='Output groups dir')
     p.add_argument('--zones', nargs='+', type=str, default=_default_zones_for_release(release_default),
                    help='Zone numbers or labels (e.g., 00 01 ... or NGC1 NGC2)')
-    p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='void')
-    p.add_argument('--source', choices=['data','rand','both'], default='rand')
+    p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament')
+    p.add_argument('--source', choices=['data','rand','both'], default='data')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames')
     p.add_argument('--release', default=release_default.upper(), help='Release tag stored in FITS metadata')
-    p.add_argument('--r-lower', type=float, default=-0.9, help='Lower r threshold (must be negative)')
+    p.add_argument('--r-lower', type=float, default=-0.3, help='Lower r threshold (must be negative)')
     p.add_argument('--r-upper', type=float, default=0.9, help='Upper r threshold (must be positive)')
     return p.parse_args()
 

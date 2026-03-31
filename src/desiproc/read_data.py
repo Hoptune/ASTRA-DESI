@@ -191,7 +191,7 @@ def process_real(real_tables, tracer, zone, north_rosettes):
         if len(sel) == 0:
             raise ValueError(f'No entries for zone {zone} in tracer {tracer} ({hemi})')
         sel = _compute_cartesian(sel)
-        sel['TRACERTYPE'] = f'{tracer}_DATA'
+        sel['TRACERTYPE'] = tracer
         sel['RANDITER'] = np.full(len(sel), -1, dtype=np.int32)
         return sel
     except KeyError:
@@ -250,7 +250,7 @@ def generate_randoms(random_tables, tracer, zone, north_rosettes, n_random, real
             sel = zone_tables_xyz[idx]
             rows = np.random.default_rng(j).choice(len(sel), real_count, replace=False)
             samp = sel[rows]
-            samp['TRACERTYPE'] = f'{tracer}_RAND'
+            samp['TRACERTYPE'] = tracer
             samp['RANDITER'] = np.full(len(samp), j, dtype=np.int32)
             samples.append(samp)
 
@@ -300,7 +300,7 @@ def process_real_region(real_tables, tracer, region, cuts, zone_value=9001):
             raise ValueError(f'No entries for {tracer} in region {region} after cuts {cuts}')
         sel = _ensure_zone_column(sel, zone_value)
         sel = _compute_cartesian(sel)
-        sel['TRACERTYPE'] = f'{tracer}_DATA'
+        sel['TRACERTYPE'] = tracer
         sel['RANDITER'] = np.full(len(sel), -1, dtype=np.int32)
         return sel
     except KeyError:
@@ -372,7 +372,7 @@ def generate_randoms_region(random_tables, tracer, region, cuts, n_random, real_
             rng = np.random.default_rng(j)
             rows = rng.choice(len(pool), real_count, replace=False)
             samp = pool[rows]
-            samp['TRACERTYPE'] = f'{tracer}_RAND'
+            samp['TRACERTYPE'] = tracer
             samp['RANDITER'] = np.full(len(samp), j, dtype=np.int32)
             samples.append(samp)
 
@@ -464,7 +464,7 @@ def process_real_dr2(real_tables, tracer, zone_label, zone_value=2001,
                      tracer_id=None, include_tracertype=True, downcast=True):
     """
     Return DR2 real objects for the requested zone label.
-    
+
     Args:
         real_tables (dict): Preloaded real tables keyed by tracer and zone label.
         tracer (str): Tracer identifier (e.g., ``'BGS_ANY'``).
@@ -496,7 +496,7 @@ def process_real_dr2(real_tables, tracer, zone_label, zone_value=2001,
         if tracer_id is not None:
             sel['TRACER_ID'] = Column(np.full(len(sel), int(tracer_id), dtype=np.uint8), name='TRACER_ID')
         if include_tracertype:
-            sel['TRACERTYPE'] = Column(_build_fixed_string_array(len(sel), f'{tracer}_DATA'),
+            sel['TRACERTYPE'] = Column(_build_fixed_string_array(len(sel), tracer),
                                        name='TRACERTYPE')
         return sel
     except KeyError:
@@ -512,7 +512,7 @@ def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_table
                          downcast=True):
     """
     Return DR2 random catalogues sampled directly from the zone-specific pool.
-    
+
     Args:
         random_tables (dict): Preloaded random tables keyed by tracer and zone label.
         tracer (str): Tracer identifier (e.g., ``'BGS_ANY'``).
@@ -612,7 +612,7 @@ def generate_randoms_dr2(random_tables, tracer, zone_label, n_random, real_table
         if ('TRACER_ID' in real_table.colnames) or tracer_id is not None:
             tracer_id_col = np.full(total_out, tracer_code, dtype=np.uint8)
 
-        tracertype = _build_fixed_string_array(total_out, f'{tracer}_RAND', min_length=8) if include_tracertype else None
+        tracertype = _build_fixed_string_array(total_out, tracer, min_length=8) if include_tracertype else None
 
         randiter_dtype = np.int16 if downcast else np.int32
         randiter = np.empty(total_out, dtype=randiter_dtype)

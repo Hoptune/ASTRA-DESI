@@ -26,7 +26,7 @@ os.environ.setdefault('ASTRA_PROB_SKIP_COMBINED', '1')
 def _read_groups_compat(groups_dir, zone, webtype, out_tag=None):
     """
     Read groups FITS using a zone tag that supports numeric or string labels (e.g., 'NGC1').
-    
+
     Args:
         groups_dir (str): Directory containing groups files.
         zone (int or str): Zone number (0-99) or label (e.g., 'NGC1').
@@ -115,7 +115,7 @@ def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_colum
 def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
                   out_tag=None, release_tag=None,
                   reuse_pair_store=None, reuse_class_store=None,
-                  spill_dir=None):
+                  spill_dir=None, allow_pair_reuse=False):
     """
     Classify a zone by generating pairs, classification, and probability files.
     Saves the generated files in the specified output directory.
@@ -127,6 +127,9 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
         n_random (int): Number of randoms per real object.
         r_lower (float): Lower ``r`` threshold (negative).
         r_upper (float): Upper ``r`` threshold (positive).
+        allow_pair_reuse (bool): When ``True``, rebuild class/prob from an existing pairs
+            FITS if present. Defaults to ``False`` to avoid loading very large pairs
+            tables into memory.
     Raises:
         RuntimeError: If classification or saving files fails.
     """
@@ -142,10 +145,16 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
         for path in (pairs_file, class_file, prob_file):
             os.makedirs(os.path.dirname(path), exist_ok=True)
 
-        if os.path.exists(pairs_file):
+        pair_exists = os.path.exists(pairs_file)
+        class_exists = os.path.exists(class_file)
+        prob_exists = os.path.exists(prob_file)
+
+        if pair_exists and class_exists and prob_exists:
+            print(f'[classify] Found class and probability files; skipping rebuild for {prefix}')
+        elif pair_exists and allow_pair_reuse:
             print(f'[classify] Reusing existing pairs: {pairs_file}')
-            need_class = not os.path.exists(class_file)
-            need_prob = not os.path.exists(prob_file)
+            need_class = not class_exists
+            need_prob = not prob_exists
             if need_class or need_prob:
                 class_store = None
                 cleanup_class = False
@@ -200,6 +209,8 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
             else:
                 print(f'[classify] Found class and probability files; skipping rebuild for {prefix}')
         else:
+            if pair_exists and not allow_pair_reuse:
+                print(f'[classify] Pairs exist but allow_pair_reuse is False; regenerating pairs/class/prob for {prefix}')
             reused_stores = False
             if reuse_pair_store and reuse_class_store:
                 if os.path.isdir(reuse_pair_store) and os.path.isdir(reuse_class_store):
@@ -223,7 +234,7 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
                             cleanup()
     except Exception as e:
         raise RuntimeError(f'Error classifying zone {zone}: {e}') from e
-    
+
 
 def plot_zone_wedges_for_args(z, args, plot_dir):
     """
@@ -308,12 +319,20 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
         print(f'[plot] skip zone {tag}: cannot read probabilities ({e})')
     else:
         prob_tbl = classify_by_probability(prob_tbl)
-        pm = mask_source(np.asarray(prob_tbl['RANDITER']), args.source)
-        prob_tbl = prob_tbl[pm]
+        if 'RANDITER' in prob_tbl.colnames:
+            pm = mask_source(np.asarray(prob_tbl['RANDITER']), args.source)
+            prob_tbl = prob_tbl[pm]
+        elif str(args.source).lower() == 'rand':
+            prob_tbl = prob_tbl[:0]
         if len(prob_tbl) == 0:
             print(f'[plot] skip zone {tag}: probability table empty after source={args.source}')
         else:
-            join_keys = ['TARGETID', 'RANDITER']
+            if 'RANDITER' in prob_tbl.colnames and 'RANDITER' in raw.colnames:
+                join_keys = ['TARGETID', 'RANDITER']
+            elif 'TRACERTYPE' in prob_tbl.colnames and 'TRACERTYPE' in raw.colnames:
+                join_keys = ['TARGETID', 'TRACERTYPE']
+            else:
+                join_keys = ['TARGETID']
             prob_cols = set(prob_tbl.colnames)
             missing_cols = [key for key in join_keys if key not in prob_cols]
             if missing_cols:
@@ -322,7 +341,7 @@ def plot_zone_wedges_for_args(z, args, plot_dir):
             elif 'WEBTYPE' not in prob_cols:
                 print(f'[plot] skip zone {tag}: probability table missing WEBTYPE column')
             else:
-                keep_cols = [c for c in ('TARGETID', 'RANDITER', 'WEBTYPE') if c in prob_cols]
+                keep_cols = [c for c in ('TARGETID', 'TRACERTYPE', 'RANDITER', 'WEBTYPE') if c in prob_cols]
                 types_join = join(raw, prob_tbl[keep_cols], keys=join_keys, join_type='inner')
                 if len(types_join) == 0:
                     print(f'[plot] skip zone {tag}: join between raw and probability tables is empty')
@@ -353,7 +372,11 @@ def _base_tracer_labels(tracer_col):
         name = str(raw)
         if not name:
             continue
-        base = name.rsplit('_', 1)[0]
+        head, sep, tail = name.rpartition('_')
+        if sep and tail.upper() in {'DATA', 'RAND'}:
+            base = head
+        else:
+            base = name
         labels.add(base.upper())
     return labels
 
@@ -378,7 +401,7 @@ def _stack_tables(parts):
 def _read_table_if_exists(path):
     """
     Read astropy table if exists.
-    
+
     Args:
         path (str or None): Path to the FITS file.
     Returns:
@@ -397,7 +420,7 @@ def _read_table_if_exists(path):
 def _write_table_with_meta(tbl, path, zone, release_tag):
     """
     Persist ``tbl`` to ``path`` ensuring standard metadata is present.
-    
+
     Args:
         tbl (Table | None): Table to write.
         path (str): Output FITS file path.
@@ -501,8 +524,8 @@ def main():
 
         p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament', help='Webtype to group')
         p.add_argument('--source', choices=['data','rand','both'], default='data', help='Use data, randoms, or both for FoF')
-        p.add_argument('--r-lower', type=float, default=-0.9,
-                       help='Lower r threshold used to classify web types (default: -0.9)')
+        p.add_argument('--r-lower', type=float, default=-0.3,
+                       help='Lower r threshold used to classify web types (default: -0.3)')
         p.add_argument('--r-upper', type=float, default=0.9,
                        help='Upper r threshold used to classify web types (default: 0.9)')
         p.add_argument('--r-limit', type=float, default=None,
@@ -526,6 +549,10 @@ def main():
                        help='Path to an existing TempTableStore directory containing pair chunks (resume mode).')
         p.add_argument('--reuse-class-store', default=None,
                        help='Path to an existing TempTableStore directory containing classification chunks (resume mode).')
+        p.add_argument('--allow-pair-reuse', action='store_true',
+                       default=_bool_env('ASTRA_ALLOW_PAIR_REUSE', default=False),
+                       help='Reuse an existing pairs FITS to rebuild class/prob files. '
+                            'By default pairs are regenerated to avoid loading massive FITS tables into memory.')
         p.add_argument('--spill-dir', default=None,
                        help='Directory where temporary chunk files are written (defaults to $ASTRA_TMPDIR/PSCRATCH/TMPDIR).')
         p.add_argument('--chunk-rows', type=int, default=None,
@@ -665,7 +692,8 @@ def main():
                           out_tag=args.out_tag, release_tag=release_tag,
                           reuse_pair_store=args.reuse_pairs_store,
                           reuse_class_store=args.reuse_class_store,
-                          spill_dir=args.spill_dir)
+                          spill_dir=args.spill_dir,
+                          allow_pair_reuse=args.allow_pair_reuse)
             print(f'-- [pipeline] Classified zone {z} in {time.time()-stage_start:.2f} s')
 
             if _bool_env('ASTRA_SKIP_GROUPS', False) or (_bool_env('ASTRA_CLASS_SKIP_COMBINED', False) and _bool_env('ASTRA_CLASS_SPLIT_ITER', False)):
@@ -689,7 +717,7 @@ def main():
                     print(f'--- [pipeline] Plotted zone {tag} in {time.time()-stage_start:.2f} s')
             else:
                 tag = f'{z:02d}' if isinstance(z, int) else str(z)
-            
+
     except Exception as e:
         raise RuntimeError(f'Pipeline failed with: {e}') from e
 

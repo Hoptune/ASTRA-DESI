@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=qso_ngc
+#SBATCH --job-name=bgs_ngc
 #SBATCH --account=desi
 #SBATCH -q regular
 #SBATCH -C cpu
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --time=12:00:00
+#SBATCH --time=48:00:00
 #SBATCH --mem=0
 #SBATCH --array=0%1
 #SBATCH --hint=nomultithread
@@ -46,6 +46,7 @@ export ASTRA_CLASS_SPLIT_ITER=1
 export ASTRA_CLASS_SKIP_COMBINED=1
 export ASTRA_PROB_SPLIT_ITER=1
 export ASTRA_PROB_SKIP_COMBINED=1
+export ASTRA_ALLOW_PAIR_REUSE=0
 
 
 export ASTRA_RAW_SPILL_DIR="${RAW_SPILL}"
@@ -57,7 +58,7 @@ fi
 mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${GROUPS_OUT}" "${PLOTS_OUT}" "${LOGDIR}" "${RAW_SPILL}" "${PAIR_SPILL}"
 
 ZLABELS=("NGC")
-TRACERS_BY_ZONE=("QSO")
+TRACERS_BY_ZONE=("BGS")
 
 if [[ -n ${REUSE_PAIR_STORE:-} ]]; then
   echo "[sbatch] reuse pair store -> ${REUSE_PAIR_STORE}"
@@ -67,6 +68,9 @@ if [[ -n ${REUSE_CLASS_STORE:-} ]]; then
 fi
 if [[ -n ${CHUNK_ROWS:-} ]]; then
   echo "[sbatch] chunk rows override -> ${CHUNK_ROWS}"
+fi
+if [[ -n ${ALLOW_PAIR_REUSE:-} ]]; then
+  echo "[sbatch] allow_pair_reuse flag -> ${ALLOW_PAIR_REUSE}"
 fi
 
 if (( SLURM_ARRAY_TASK_ID >= ${#ZLABELS[@]} )); then
@@ -97,6 +101,14 @@ fi
 
 if [[ -n ${CHUNK_ROWS:-} ]]; then
   TRACE_ARGS+=(--chunk-rows "${CHUNK_ROWS}")
+fi
+
+ALLOW_PAIR_REUSE=${ALLOW_PAIR_REUSE:-0}
+if [[ "${ALLOW_PAIR_REUSE}" == "1" ]]; then
+  TRACE_ARGS+=(--allow-pair-reuse)
+  export ASTRA_ALLOW_PAIR_REUSE=1
+else
+  export ASTRA_ALLOW_PAIR_REUSE=0
 fi
 
 TRACER_SAFE=${TRACER_LABEL// /_}

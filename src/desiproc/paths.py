@@ -67,7 +67,7 @@ def tracer_tag(tag):
 def _tracer_subdir(tag):
     """
     Return the subdirectory name for a given tracer tag.
-    
+
     Args:
         tag (object | None): Tracer tag to normalize.
     Returns:
@@ -157,10 +157,13 @@ def classification_path(base_dir, zone, tag=None):
     Returns:
         str: Classification file path.
     """
+    root = _subdir(base_dir, 'classification')
+    fname = classification_filename(zone, tag)
+    if tag is None:
+        return os.path.join(root, fname)
     tracer = _tracer_subdir(tag)
     zone_dir = zone_tag(zone).lower()
-    return os.path.join(_subdir(base_dir, 'classification'), tracer, zone_dir,
-                        classification_filename(zone, tag))
+    return os.path.join(root, tracer, zone_dir, fname)
 
 def probability_path(base_dir, zone, tag=None):
     """
@@ -173,10 +176,13 @@ def probability_path(base_dir, zone, tag=None):
     Returns:
         str: Probability file path.
     """
+    root = _subdir(base_dir, 'probabilities')
+    fname = probability_filename(zone, tag)
+    if tag is None:
+        return os.path.join(root, fname)
     tracer = _tracer_subdir(tag)
     zone_dir = zone_tag(zone).lower()
-    return os.path.join(_subdir(base_dir, 'probabilities'), tracer, zone_dir,
-                        probability_filename(zone, tag))
+    return os.path.join(root, tracer, zone_dir, fname)
 
 
 def pairs_path(base_dir, zone, tag=None):
@@ -234,10 +240,17 @@ def locate_classification_file(base_dir, zone, tag=None):
     Raises:
         FileNotFoundError: If the file does not exist.
     """
-    path = classification_path(base_dir, zone, tag)
-    if not os.path.exists(path):
-        raise FileNotFoundError(path)
-    return path
+    fname = classification_filename(zone, tag)
+    zone_dir = zone_tag(zone).lower()
+    candidates = [
+        classification_path(base_dir, zone, tag),
+        os.path.join(_subdir(base_dir, 'classification'), fname),
+        os.path.join(_subdir(base_dir, 'classification'), zone_dir, fname),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(candidates[0])
 
 
 def locate_probability_file(base_dir, zone, tag=None):
@@ -253,10 +266,17 @@ def locate_probability_file(base_dir, zone, tag=None):
     Raises:
         FileNotFoundError: If the file does not exist.
     """
-    path = probability_path(base_dir, zone, tag)
-    if not os.path.exists(path):
-        raise FileNotFoundError(path)
-    return path
+    fname = probability_filename(zone, tag)
+    zone_dir = zone_tag(zone).lower()
+    candidates = [
+        probability_path(base_dir, zone, tag),
+        os.path.join(_subdir(base_dir, 'probabilities'), fname),
+        os.path.join(_subdir(base_dir, 'probabilities'), zone_dir, fname),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(candidates[0])
 
 
 def locate_pairs_file(base_dir, zone, tag=None):
