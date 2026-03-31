@@ -1394,8 +1394,8 @@ def build_probability_table(class_rows, raw_table=None, r_lower=-0.25, r_med=0.2
     Returns:
         Table: Table with probability information.
     """
-    if r_lower >= 0 or r_upper <= 0:
-        raise ValueError('r_lower must be negative and r_upper must be positive.')
+    if r_lower >= 0 or r_upper <= 0 or not (r_lower < r_med < r_upper):
+        raise ValueError('r thresholds must satisfy r_lower < r_med < r_upper with r_lower < 0 < r_upper.')
 
     dense_acc, fallback_records, random_store = _compute_probability_components(class_rows,
                                                                                 raw_table=raw_table,
@@ -1438,8 +1438,8 @@ def save_probability_fits(class_rows, raw_table=None, output_path=None, r_lower=
     """
     if output_path is None:
         raise ValueError('output_path must be provided')
-    if r_lower >= 0 or r_upper <= 0:
-        raise ValueError('r_lower must be negative and r_upper must be positive.')
+    if r_lower >= 0 or r_upper <= 0 or not (r_lower < r_med < r_upper):
+        raise ValueError('r thresholds must satisfy r_lower < r_med < r_upper with r_lower < 0 < r_upper.')
 
     spill_dir = None
     if isinstance(class_rows, TempTableStore):

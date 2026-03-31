@@ -26,8 +26,9 @@ export ASTRA_CLASS_SKIP_COMBINED=0
 export ASTRA_PROB_SPLIT_ITER=0
 export ASTRA_PROB_SKIP_COMBINED=0
 
-R_LOWER=${R_LOWER:--0.3}
-R_UPPER=${R_UPPER:-0.9}
+R_LOWER=${R_LOWER:--0.25}
+R_MED=${R_MED:-0.25}
+R_UPPER=${R_UPPER:-0.65}
 export PAIR_NJOBS_CAP=${PAIR_NJOBS_CAP:-128}
 
 PROJECT_ROOT=$PWD
@@ -58,6 +59,7 @@ srun --cpu-bind=cores \
        --groups-out "${GROUPS_OUT}" \
        --plot-output "${PLOTS_OUT}" \
        --r-lower "${R_LOWER}" \
+       --r-med "${R_MED}" \
        --r-upper "${R_UPPER}" \
        --n-random 100 \
        --plot

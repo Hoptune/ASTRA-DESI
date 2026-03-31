@@ -25,8 +25,9 @@ export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 export PAIR_NJOBS_CAP=1
 
-R_LOWER=${R_LOWER:--0.9}
-R_UPPER=${R_UPPER:-0.9}
+R_LOWER=${R_LOWER:--0.25}
+R_MED=${R_MED:-0.25}
+R_UPPER=${R_UPPER:-0.65}
 
 PROJECT_ROOT=$PWD
 MAIN_SCRIPT="${PROJECT_ROOT}/src/main.py"
@@ -127,6 +128,7 @@ srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
        --groups-out "${GROUPS_OUT}" \
        --plot-output "${PLOTS_OUT}" \
        --r-lower "${R_LOWER}" \
+       --r-med "${R_MED}" \
        --r-upper "${R_UPPER}" \
        --webtype filament \
        --source data \

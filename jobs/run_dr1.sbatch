@@ -24,8 +24,9 @@ export NUMEXPR_NUM_THREADS=1
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 
-R_LOWER=${R_LOWER:--0.9}
-R_UPPER=${R_UPPER:-0.9}
+R_LOWER=${R_LOWER:--0.25}
+R_MED=${R_MED:-0.25}
+R_UPPER=${R_UPPER:-0.65}
 export PAIR_NJOBS_CAP=${PAIR_NJOBS_CAP:-128}
 
 PROJECT_ROOT=$PWD
@@ -83,6 +84,7 @@ srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
        --groups-out "${GROUPS_OUT}" \
        --plot-output "${PLOTS_OUT}" \
        --r-lower "${R_LOWER}" \
+       --r-med "${R_MED}" \
        --r-upper "${R_UPPER}" \
        --webtype filament \
        --source data \

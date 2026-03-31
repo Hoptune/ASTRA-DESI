@@ -1394,8 +1394,9 @@ def parse_args():
     p.add_argument('--use-presets', action='store_true', help='Apply tracer-specific defaults to emphasize filaments (e.g., higher min-npts for LRG)')
     p.add_argument('--highlight-longest', type=int, default=None, help='Highlight top-K longest groups per tracer (projected)')
     p.add_argument('--highlight-connect', action='store_true', help='Connect points for highlighted groups')
-    p.add_argument('--r-lower', type=float, default=None, help='Lower r threshold (<0) for mapping counts to web types (default: header value or -0.3)')
-    p.add_argument('--r-upper', type=float, default=None, help='Upper r threshold (>0) for mapping counts to web types (default: header value or 0.9)')
+    p.add_argument('--r-lower', type=float, default=None, help='Lower r threshold (<0) for mapping counts to web types (default: header value or -0.25)')
+    p.add_argument('--r-med', type=float, default=None, help='Middle r threshold for mapping counts to web types (default: header value or 0.25)')
+    p.add_argument('--r-upper', type=float, default=None, help='Upper r threshold (>0) for mapping counts to web types (default: header value or 0.65)')
     return p.parse_args()
 
 

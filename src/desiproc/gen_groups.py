@@ -689,7 +689,7 @@ def _write_groups_fits(store, out_dir, zone, webtype, out_tag=None, release_tag=
 
 
 def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
-                 r_lower, r_upper, release_tag=None, out_tag=None):
+                 r_lower, r_med, r_upper, release_tag=None, out_tag=None):
     """
     Generate group catalogues for a zone.
 
@@ -706,6 +706,7 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
         webtype (str): Desired cosmic web type (e.g., ``'filament'``).
         source (str): Source selection (``'data'``, ``'rand'``, or ``'both'``).
         r_lower (float): Lower r threshold (negative).
+        r_med (float): Middle r threshold.
         r_upper (float): Upper r threshold (positive).
         release_tag (str, optional): Release label stored in output metadata.
         out_tag (str, optional): Tag appended to filenames.
@@ -760,7 +761,7 @@ def process_zone(zone, raw_dir, class_dir, out_dir, webtype, source,
         np.divide(r_num, r_den, out=r_val, where=(r_den > 0))
 
         valid = np.isfinite(r_val)
-        bins = np.array([r_lower, 0.0, r_upper], dtype=float)
+        bins = np.array([r_lower, r_med, r_upper], dtype=float)
         webtypes = np.full(len(class_tbl), '', dtype='U8')
         if np.any(valid):
             idx = np.clip(np.digitize(r_val[valid], bins, right=False), 0, 3)
@@ -857,22 +858,23 @@ def parse_args():
     p.add_argument('--source', choices=['data','rand','both'], default='data')
     p.add_argument('--out-tag', type=str, default=None, help='Tag appended to filenames')
     p.add_argument('--release', default=release_default.upper(), help='Release tag stored in FITS metadata')
-    p.add_argument('--r-lower', type=float, default=-0.3, help='Lower r threshold (must be negative)')
-    p.add_argument('--r-upper', type=float, default=0.9, help='Upper r threshold (must be positive)')
+    p.add_argument('--r-lower', type=float, default=-0.25, help='Lower r threshold (default: -0.25)')
+    p.add_argument('--r-med', type=float, default=0.25, help='Middle r threshold (default: 0.25)')
+    p.add_argument('--r-upper', type=float, default=0.65, help='Upper r threshold (default: 0.65)')
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    if args.r_lower >= 0 or args.r_upper <= 0:
-        raise ValueError('r-lower must be negative and r-upper must be positive.')
+    if args.r_lower >= 0 or args.r_upper <= 0 or not (args.r_lower < args.r_med < args.r_upper):
+        raise ValueError('r thresholds must satisfy r-lower < r-med < r-upper with r-lower < 0 < r-upper.')
     release_tag = str(args.release).upper()
     init = t.time()
     for z in args.zones:
         outputs = process_zone(z, raw_dir=args.raw_dir, class_dir=args.class_dir,
                                out_dir=args.groups_dir, webtype=args.webtype,
                                source=args.source,
-                               r_lower=args.r_lower, r_upper=args.r_upper,
+                               r_lower=args.r_lower, r_med=args.r_med, r_upper=args.r_upper,
                                release_tag=release_tag,
                                out_tag=args.out_tag)
         if outputs:

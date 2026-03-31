@@ -112,7 +112,7 @@ def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_colum
 
 
 
-def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
+def classify_zone(zone, tbl, output_class, n_random, r_lower, r_med, r_upper,
                   out_tag=None, release_tag=None,
                   reuse_pair_store=None, reuse_class_store=None,
                   spill_dir=None, allow_pair_reuse=False):
@@ -126,6 +126,7 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
         output_class (str): Output directory for classification files.
         n_random (int): Number of randoms per real object.
         r_lower (float): Lower ``r`` threshold (negative).
+        r_med (float): Middle ``r`` threshold.
         r_upper (float): Upper ``r`` threshold (positive).
         allow_pair_reuse (bool): When ``True``, rebuild class/prob from an existing pairs
             FITS if present. Defaults to ``False`` to avoid loading very large pairs
@@ -140,7 +141,13 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
         prob_file = probability_path(output_class, zone, out_tag)
 
         zone_header = zone_tag(zone)
-        meta = {'ZONE': zone_header, 'RELEASE': str(release_tag) if release_tag is not None else 'UNKNOWN'}
+        meta = {
+            'ZONE': zone_header,
+            'RELEASE': str(release_tag) if release_tag is not None else 'UNKNOWN',
+            'RLOWER': float(r_lower),
+            'RMED': float(r_med),
+            'RUPPER': float(r_upper),
+        }
 
         for path in (pairs_file, class_file, prob_file):
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -189,7 +196,9 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
                         try:
                             astra.save_pairs_fits(pr, pairs_file, meta=meta)
                             astra.save_classification_fits(cr, class_file, meta=meta)
-                            astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+                            astra.save_probability_fits(cr, tbl, prob_file,
+                                                        r_lower=r_lower, r_med=r_med, r_upper=r_upper,
+                                                        meta=meta)
                         finally:
                             for store in (pr, cr):
                                 cleanup = getattr(store, 'cleanup', None)
@@ -200,7 +209,9 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
                 if not regen_completed:
                     try:
                         astra.save_classification_fits(class_store, class_file, meta=meta)
-                        astra.save_probability_fits(class_store, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+                        astra.save_probability_fits(class_store, tbl, prob_file,
+                                                    r_lower=r_lower, r_med=r_med, r_upper=r_upper,
+                                                    meta=meta)
                     finally:
                         if cleanup_class:
                             cleanup = getattr(class_store, 'cleanup', None)
@@ -225,7 +236,9 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_upper,
             try:
                 astra.save_pairs_fits(pr, pairs_file, meta=meta)
                 astra.save_classification_fits(cr, class_file, meta=meta)
-                astra.save_probability_fits(cr, tbl, prob_file, r_lower=r_lower, r_upper=r_upper, meta=meta)
+                astra.save_probability_fits(cr, tbl, prob_file,
+                                            r_lower=r_lower, r_med=r_med, r_upper=r_upper,
+                                            meta=meta)
             finally:
                 if not reused_stores:
                     for store in (pr, cr):
@@ -524,12 +537,14 @@ def main():
 
         p.add_argument('--webtype', choices=['void','sheet','filament','knot'], default='filament', help='Webtype to group')
         p.add_argument('--source', choices=['data','rand','both'], default='data', help='Use data, randoms, or both for FoF')
-        p.add_argument('--r-lower', type=float, default=-0.3,
-                       help='Lower r threshold used to classify web types (default: -0.3)')
-        p.add_argument('--r-upper', type=float, default=0.9,
-                       help='Upper r threshold used to classify web types (default: 0.9)')
+        p.add_argument('--r-lower', type=float, default=-0.25,
+                       help='Lower r threshold used to classify web types (default: -0.25)')
+        p.add_argument('--r-med', type=float, default=0.25,
+                       help='Middle r threshold used to classify web types (default: 0.25)')
+        p.add_argument('--r-upper', type=float, default=0.65,
+                       help='Upper r threshold used to classify web types (default: 0.65)')
         p.add_argument('--r-limit', type=float, default=None,
-                       help='[Deprecated] Symmetric absolute threshold; overrides --r-lower/--r-upper when set')
+                       help='[Deprecated] Symmetric absolute threshold; overrides --r-lower/--r-med/--r-upper when set')
 
         p.add_argument('--zone', type=int, default=None, help='Single zone to run (0...19)')
         p.add_argument('--plot', action='store_true', help='Generate wedge plots after grouping')
@@ -573,9 +588,10 @@ def main():
         if args.r_limit is not None:
             sym = float(abs(args.r_limit))
             args.r_lower = -sym
+            args.r_med = 0.0
             args.r_upper = sym
-        if args.r_lower >= 0 or args.r_upper <= 0:
-            raise ValueError('--r-lower must be negative and --r-upper must be positive.')
+        if args.r_lower >= 0 or args.r_upper <= 0 or not (args.r_lower < args.r_med < args.r_upper):
+            raise ValueError('--r thresholds must satisfy --r-lower < --r-med < --r-upper with --r-lower < 0 < --r-upper.')
 
         if args.chunk_rows and args.chunk_rows > 0:
             astra._DEFAULT_CHUNK_ROWS = max(1, int(args.chunk_rows))
@@ -688,7 +704,7 @@ def main():
 
             stage_start = time.time()
             classify_zone(z, tbl, args.class_out, args.n_random,
-                          args.r_lower, args.r_upper,
+                          args.r_lower, args.r_med, args.r_upper,
                           out_tag=args.out_tag, release_tag=release_tag,
                           reuse_pair_store=args.reuse_pairs_store,
                           reuse_class_store=args.reuse_class_store,
@@ -702,7 +718,7 @@ def main():
 
             stage_start = time.time()
             outputs = process_zone(z, args.raw_out, args.class_out, args.groups_out,
-                                   args.webtype, args.source, args.r_lower, args.r_upper,
+                                   args.webtype, args.source, args.r_lower, args.r_med, args.r_upper,
                                    release_tag=release_tag, out_tag=args.out_tag)
             print(f'-- [pipeline] Grouped zone {z} in {time.time()-stage_start:.2f} s')
 
