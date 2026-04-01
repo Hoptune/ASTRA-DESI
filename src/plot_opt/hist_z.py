@@ -169,12 +169,11 @@ def plot_histogram(base, zones, outdir, bins=30, zmin=0.0, zmax=3.5, chunk_rows=
         plotted = True
 
     if not plotted:
-        raise RuntimeError('No se encontró ningún archivo raw compatible para las zonas/tracers pedidos.')
+        raise RuntimeError()
     ax.set_xlim(zmin, zmax)
     ax.set_xlabel(r'$Z$')
     ax.set_ylabel(r'$N_{\mathrm{Gal}}/\Delta Z$')
     # ax.set_yscale('log')
-    # ax.set_title(r'Redshift distribution by tracer')
 
     leg = ax.legend(loc='upper right')
     fig.tight_layout()
