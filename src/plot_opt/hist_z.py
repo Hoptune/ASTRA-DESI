@@ -23,8 +23,8 @@ def tracer_aliases(tracer):
                'BGS_BRIGHT': ('BGS_BRIGHT', 'BGS', 'BGS_ANY'),
                'ELG': ('ELG', 'ELG_LOPNOTQSO', 'ELG_LOPnotqso'),
                'ELG_LOPNOTQSO': ('ELG_LOPNOTQSO', 'ELG', 'ELG_LOPnotqso'),
-               'LRG': ('LRG'),
-               'QSO': ('QSO')}
+               'LRG': ('LRG',),
+               'QSO': ('QSO',)}
     return mapping.get(t, (t,))
 
 
