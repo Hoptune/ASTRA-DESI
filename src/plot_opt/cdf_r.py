@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
+plt.style.use('dark_background')
 
 
 def setup_style():
@@ -190,16 +191,16 @@ def build_zone_mean_cdfs(files_for_zone, xgrid, chunk_rows=500_000,
 
 def plot_cdf_mean100_sigma_zones(base, outdir, chunk_rows=500_000,
                                  xbins=400, iter_min=None, iter_max=None):
-    colors = {'BGS': '#1f3cff',
-              'ELG': '#ff2a2a',
-              'LRG': '#16c43b',
-              'QSO': '#b026ff'}
+    colors = {'BGS': 'crimson',
+              'LRG': 'green',
+              'ELG': 'darkorange',
+              'QSO': 'deepskyblue'}
 
     tracers = ['BGS', 'ELG', 'LRG', 'QSO']
     xgrid = np.linspace(-1.0, 1.0, xbins)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.grid(True)
+    fig, ax = plt.subplots()
+    ax.grid(lw=0.1, alpha=0.5)
 
     plotted = False
 
@@ -235,7 +236,7 @@ def plot_cdf_mean100_sigma_zones(base, outdir, chunk_rows=500_000,
             high = np.clip(mean_zone + std_zone, 0.0, 1.0)
 
             ax.fill_between(xgrid, low, high, color=color, alpha=0.18, zorder=2)
-            ax.plot(xgrid, mean_zone, color=color, lw=2.2, zorder=3,
+            ax.plot(xgrid, mean_zone, color=color, lw=1.2, zorder=3,
                     label=rf'{tracer} real')
             plotted = True
 
@@ -248,7 +249,7 @@ def plot_cdf_mean100_sigma_zones(base, outdir, chunk_rows=500_000,
             high = np.clip(mean_zone + std_zone, 0.0, 1.0)
 
             ax.fill_between(xgrid, low, high, color=color, alpha=0.08, zorder=1)
-            ax.plot(xgrid, mean_zone, color=color, lw=1.8, ls='--', zorder=3,
+            ax.plot(xgrid, mean_zone, color=color, lw=1., ls=':', zorder=3,
                     label=rf'{tracer} rand')
             plotted = True
 
@@ -262,9 +263,6 @@ def plot_cdf_mean100_sigma_zones(base, outdir, chunk_rows=500_000,
     # ax.set_title(r'CDF of $r$', pad=10)
 
     leg = ax.legend(loc='upper left', frameon=True)
-    for txt in leg.get_texts():
-        txt.set_color('white')
-
     fig.tight_layout()
 
     suffix = 'alliters'
