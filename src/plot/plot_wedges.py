@@ -1684,7 +1684,7 @@ def main():
             source_iter_line = source_label
         mode_kwargs = {
             'groups': dict(color_mode='group', title=f"{webtype_arg.capitalize()}s in zone {zone_label}\n{source_iter_line}"),
-            'types': dict(color_mode='webtype', title=f"Zone {zone_label} - {source_iter_line}", webtype_order=legend_order),
+            'types': dict(color_mode='webtype', title=f"Zone {zone_label}", webtype_order=legend_order),
             'structure': dict(color_mode='mono', title=f"Zone {zone_label} - {source_iter_line}")
         }
 
