@@ -1,4 +1,4 @@
-import os, glob, argparse
+import os, re, glob, argparse
 from pathlib import Path
 
 import numpy as np
@@ -29,8 +29,8 @@ def histogram_to_pdf_from_samples(H, bin_edges):
 
 def discover_file(summary_dir, tracer, zone):
     summary_dir = Path(summary_dir)
-    tracer = tracer.lower()
-    zone = zone.lower()
+    tracer = str(tracer).lower()
+    zone = str(zone).lower()
 
     patterns = [str(summary_dir / f'{tracer}_{zone}_entropy_from_r_classification.npz'),
                 str(summary_dir / f'{tracer}_{zone}_entropy_from_classification.npz'),
@@ -45,6 +45,36 @@ def discover_file(summary_dir, tracer, zone):
     return matches[0] if matches else None
 
 
+def discover_files_for_tracer(summary_dir, tracer, zones=None):
+    tracer = str(tracer).lower()
+    summary_dir = Path(summary_dir)
+
+    out = {}
+    if zones is not None:
+        for zone in zones:
+            path = discover_file(summary_dir, tracer, zone)
+            if path is not None:
+                out[str(zone).upper()] = path
+        return out
+
+    patterns = [str(summary_dir / f'{tracer}_*_entropy_from_r_classification.npz'),
+                str(summary_dir / f'{tracer}_*_entropy_from_classification.npz')]
+    files = []
+    for pat in patterns:
+        files.extend(glob.glob(pat))
+
+    files = sorted(set(files))
+    for path in files:
+        name = os.path.basename(path)
+        m = re.match(rf'{re.escape(tracer)}_(.+?)_entropy_from(?:_r)?_classification\.npz$', name)
+        if not m:
+            continue
+        zone = str(m.group(1)).upper()
+        if zone not in out:
+            out[zone] = path
+    return out
+
+
 def load_H_obj(path):
     d = np.load(path, allow_pickle=True)
     H = d['H_obj']
@@ -52,7 +82,7 @@ def load_H_obj(path):
     return H
 
 
-def plot_joint(summary_dir, outdir, bins=35, xmin=0.0, xmax=0.56):
+def plot_joint(summary_dir, outdir, bins=35, xmin=0.0, xmax=0.56, zones=None):
     colors = {'BGS': 'crimson',
               'LRG': 'green',
               'ELG': 'darkorange',
@@ -68,41 +98,39 @@ def plot_joint(summary_dir, outdir, bins=35, xmin=0.0, xmax=0.56):
     plotted = False
 
     for tracer in tracers:
-        path_sgc = discover_file(summary_dir, tracer, 'SGC')
-        path_ngc = discover_file(summary_dir, tracer, 'NGC')
-
-        if path_sgc is None and path_ngc is None:
+        zone_files = discover_files_for_tracer(summary_dir, tracer, zones=zones)
+        if len(zone_files) == 0:
             continue
 
         color = colors[tracer]
+        zone_pdfs = []
+        zone_labels = []
+        xvals = None
 
-        if path_sgc is not None and path_ngc is not None:
-            H_sgc = load_H_obj(path_sgc)
-            H_ngc = load_H_obj(path_ngc)
-
-            x_sgc, pdf_sgc = histogram_to_pdf_from_samples(H_sgc, bin_edges)
-            x_ngc, pdf_ngc = histogram_to_pdf_from_samples(H_ngc, bin_edges)
-
-            x = x_sgc
-            pdf_low = np.minimum(pdf_sgc, pdf_ngc)
-            pdf_high = np.maximum(pdf_sgc, pdf_ngc)
-            pdf_med = 0.5 * (pdf_sgc + pdf_ngc)
-
-            ax.fill_between(x, pdf_low, pdf_high,
-                            color=color, alpha=0.4, zorder=2,
-                            label=rf'{tracer} $\pm 1\sigma$')
-
-            ax.plot(x, pdf_med, color=color, lw=1.6, zorder=4,
-                    label=rf'{tracer} median')
-        else:
-            path = path_sgc if path_sgc is not None else path_ngc
+        for zone_label, path in sorted(zone_files.items()):
             H = load_H_obj(path)
             x, pdf = histogram_to_pdf_from_samples(H, bin_edges)
+            xvals = x
+            zone_pdfs.append(pdf)
+            zone_labels.append(zone_label)
 
-            ax.plot(x, pdf, color=color, lw=2.4, zorder=4,
-                    label=rf'{tracer} median')
+        if len(zone_pdfs) > 1:
+            Y = np.vstack(zone_pdfs)
+            pdf_mean = np.nanmean(Y, axis=0)
+            pdf_std = np.nanstd(Y, axis=0, ddof=1) if Y.shape[0] > 1 else np.zeros_like(pdf_mean)
 
-            region = 'SGC' if path_sgc is not None else 'NGC'
+            ax.fill_between(xvals, np.clip(pdf_mean - pdf_std, 0.0, None), pdf_mean + pdf_std,
+                            color=color, alpha=0.35, zorder=2,
+                            label=rf'{tracer} $\pm 1\sigma_{{\rm zone}}$')
+
+            ax.plot(xvals, pdf_mean, color=color, lw=1.6, zorder=4,
+                    label=rf'{tracer} mean')
+        else:
+            pdf = zone_pdfs[0]
+            zone = zone_labels[0]
+
+            ax.plot(xvals, pdf, color=color, lw=2.4, zorder=4,
+                    label=rf'{tracer} {zone}')
 
         plotted = True
 
@@ -132,6 +160,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--summary-dir', required=True)
     parser.add_argument('--outdir', required=True)
+    parser.add_argument('--zones', nargs='*', default=None)
     parser.add_argument('--bins', type=int, default=35)
     parser.add_argument('--xmin', type=float, default=0.0)
     parser.add_argument('--xmax', type=float, default=1.0)
@@ -142,6 +171,7 @@ def main():
 
     plot_joint(summary_dir=args.summary_dir,
                outdir=args.outdir,
+               zones=args.zones,
                bins=args.bins,
                xmin=args.xmin,
                xmax=args.xmax)

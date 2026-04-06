@@ -1,34 +1,21 @@
-import os, re, glob
+import os
 import json, argparse
 from pathlib import Path
 
 import numpy as np
-from astropy.io import fits
+
+try:
+    from .io_common import (discover_classification_realizations, find_col,
+                            get_columns, iter_fits_chunks, parse_iter, safe_upper,
+                            tracer_mask)
+except ImportError:
+    from io_common import (discover_classification_realizations, find_col,
+                           get_columns, iter_fits_chunks, parse_iter, safe_upper,
+                           tracer_mask)
 
 
 ENV_NAMES = ('void', 'sheet', 'filament', 'knot')
 LOG2_4 = np.log2(4.0)
-
-
-def safe_upper(x):
-    return str(x).strip().upper()
-
-
-def tracer_aliases(tracer):
-    t = safe_upper(tracer)
-    mapping = {'BGS': ('BGS', 'BGS_ANY', 'BGS_BRIGHT'),
-               'BGS_ANY': ('BGS_ANY', 'BGS', 'BGS_BRIGHT'),
-               'BGS_BRIGHT': ('BGS_BRIGHT', 'BGS', 'BGS_ANY'),
-               'ELG': ('ELG', 'ELG_LOPNOTQSO', 'ELG_LOPnotqso'),
-               'ELG_LOPNOTQSO': ('ELG_LOPNOTQSO', 'ELG', 'ELG_LOPnotqso'),
-               'LRG': ('LRG',),
-               'QSO': ('QSO',)}
-    return mapping.get(t, (t,))
-
-
-def parse_iter(path):
-    m = re.search(r'iter(\d+)', os.path.basename(path))
-    return int(m.group(1)) if m else -1
 
 
 def normalized_shannon_from_probs(P):
@@ -79,60 +66,11 @@ def classify_from_r(r):
 
 
 def discover_classification_files(base, tracer, zone):
-    base = Path(base)
-    tracer_dir = str(tracer).lower()
-    zone_dir = str(zone).lower()
-    zone_up = safe_upper(zone)
-
-    aliases = tracer_aliases(tracer)
-    aliases_up = [safe_upper(a) for a in aliases]
-
-    class_root = base / 'classification' / tracer_dir / zone_dir
-
-    files = []
-    for a in aliases_up:
-        patterns = [str(class_root / f'zone_{zone_up}_{a}_iter*.fits.gz'),
-                    str(class_root / f'zone_{zone_up}_{a}_iter*.fits')]
-        for pat in patterns:
-            files.extend(glob.glob(pat))
-
-    files = sorted(set(files), key=parse_iter)
-    files = [f for f in files if parse_iter(f) >= 0]
-    return files
+    realized = discover_classification_realizations(base, tracer, zone)
+    return [path for _, path in realized]
 
 
-def get_columns(path):
-    with fits.open(path, memmap=True) as hdul:
-        return list(hdul[1].columns.names)
-
-
-def find_col(columns, candidates):
-    for c in candidates:
-        if c in columns:
-            return c
-    return None
-
-
-def iter_fits_chunks(path, columns, chunk_rows=500_000):
-    with fits.open(path, memmap=True) as hdul:
-        hdu = hdul[1]
-        data = hdu.data
-        if data is None:
-            return
-
-        nrows = int(hdu.header.get('NAXIS2', 0))
-        if nrows == 0:
-            return
-
-        use_cols = [c for c in columns if c in hdu.columns.names]
-
-        for start in range(0, nrows, chunk_rows):
-            stop = min(start + chunk_rows, nrows)
-            block = data[start:stop]
-            yield {col: np.asarray(block[col]) for col in use_cols}
-
-
-def collect_targetids_and_population(class_files, chunk_rows=500_000):
+def collect_targetids_and_population(class_files, tracer, chunk_rows=500_000):
     targetid_union = set()
     iterations = []
     env_counts_per_iter = []
@@ -144,6 +82,7 @@ def collect_targetids_and_population(class_files, chunk_rows=500_000):
         ndata_col = find_col(cols, ('NDATA', 'ndata'))
         nrand_col = find_col(cols, ('NRAND', 'nrand'))
         isdata_col = find_col(cols, ('ISDATA', 'isdata'))
+        tracer_col = find_col(cols, ('TRACERTYPE', 'tracertype'))
 
         if tid_col is None or ndata_col is None or nrand_col is None:
             raise ValueError(f'{path}: no encontré TARGETID, NDATA o NRAND')
@@ -151,6 +90,8 @@ def collect_targetids_and_population(class_files, chunk_rows=500_000):
         wanted = [tid_col, ndata_col, nrand_col]
         if isdata_col is not None:
             wanted.append(isdata_col)
+        if tracer_col is not None:
+            wanted.append(tracer_col)
 
         env_counts = np.zeros(4, dtype=np.int64)
 
@@ -158,12 +99,16 @@ def collect_targetids_and_population(class_files, chunk_rows=500_000):
             tids = np.asarray(chunk[tid_col], dtype=np.int64)
             ndata = np.asarray(chunk[ndata_col], dtype=np.float32)
             nrand = np.asarray(chunk[nrand_col], dtype=np.float32)
+            mask = np.ones(len(tids), dtype=bool)
 
             if isdata_col is not None:
-                mask = np.asarray(chunk[isdata_col]).astype(bool)
-                tids = tids[mask]
-                ndata = ndata[mask]
-                nrand = nrand[mask]
+                mask &= np.asarray(chunk[isdata_col]).astype(bool)
+            if tracer_col is not None:
+                mask &= tracer_mask(chunk[tracer_col], tracer)
+
+            tids = tids[mask]
+            ndata = ndata[mask]
+            nrand = nrand[mask]
 
             if len(tids) == 0:
                 continue
@@ -181,7 +126,8 @@ def collect_targetids_and_population(class_files, chunk_rows=500_000):
             targetid_union.update(tids.tolist())
             env_counts += np.bincount(env_idx, minlength=4).astype(np.int64)
 
-        iterations.append(parse_iter(path))
+        it = parse_iter(path)
+        iterations.append(-1 if it is None else int(it))
         env_counts_per_iter.append(env_counts)
 
     iterations = np.asarray(iterations, dtype=np.int32)
@@ -194,7 +140,7 @@ def collect_targetids_and_population(class_files, chunk_rows=500_000):
     return targetid_union, iterations, env_counts_per_iter
 
 
-def build_object_class_counts(class_files, targetid_union, chunk_rows=500_000):
+def build_object_class_counts(class_files, targetid_union, tracer, chunk_rows=500_000):
     targetids = np.array(sorted(targetid_union), dtype=np.int64)
     index_map = {tid: i for i, tid in enumerate(targetids)}
 
@@ -207,21 +153,28 @@ def build_object_class_counts(class_files, targetid_union, chunk_rows=500_000):
         ndata_col = find_col(cols, ('NDATA', 'ndata'))
         nrand_col = find_col(cols, ('NRAND', 'nrand'))
         isdata_col = find_col(cols, ('ISDATA', 'isdata'))
+        tracer_col = find_col(cols, ('TRACERTYPE', 'tracertype'))
 
         wanted = [tid_col, ndata_col, nrand_col]
         if isdata_col is not None:
             wanted.append(isdata_col)
+        if tracer_col is not None:
+            wanted.append(tracer_col)
 
         for chunk in iter_fits_chunks(path, wanted, chunk_rows=chunk_rows):
             tids = np.asarray(chunk[tid_col], dtype=np.int64)
             ndata = np.asarray(chunk[ndata_col], dtype=np.float32)
             nrand = np.asarray(chunk[nrand_col], dtype=np.float32)
+            mask = np.ones(len(tids), dtype=bool)
 
             if isdata_col is not None:
-                mask = np.asarray(chunk[isdata_col]).astype(bool)
-                tids = tids[mask]
-                ndata = ndata[mask]
-                nrand = nrand[mask]
+                mask &= np.asarray(chunk[isdata_col]).astype(bool)
+            if tracer_col is not None:
+                mask &= tracer_mask(chunk[tracer_col], tracer)
+
+            tids = tids[mask]
+            ndata = ndata[mask]
+            nrand = nrand[mask]
 
             if len(tids) == 0:
                 continue
@@ -265,25 +218,27 @@ def main():
     class_files = discover_classification_files(args.base, tracer, zone)
 
     if args.iter_min is not None:
-        class_files = [f for f in class_files if parse_iter(f) >= args.iter_min]
+        class_files = [f for f in class_files
+                       if parse_iter(f) is None or parse_iter(f) >= args.iter_min]
     if args.iter_max is not None:
-        class_files = [f for f in class_files if parse_iter(f) <= args.iter_max]
+        class_files = [f for f in class_files
+                       if parse_iter(f) is None or parse_iter(f) <= args.iter_max]
 
     if len(class_files) == 0:
         raise RuntimeError(f'No files for tracer={tracer}, zone={zone}')
 
     print(f'{len(class_files)} files')
 
-    targetid_union, iterations, env_counts_per_iter = collect_targetids_and_population(class_files,
-                                                                                       chunk_rows=args.chunk_rows)
+    targetid_union, iterations, env_counts_per_iter = collect_targetids_and_population(
+        class_files, tracer=tracer, chunk_rows=args.chunk_rows)
 
     print(f'N real data: {len(targetid_union)}')
 
     H_pop = np.array([normalized_shannon_from_counts(c) for c in env_counts_per_iter],
                      dtype=np.float64)
 
-    targetids, obj_counts = build_object_class_counts(class_files, targetid_union,
-                                                      chunk_rows=args.chunk_rows)
+    targetids, obj_counts = build_object_class_counts(
+        class_files, targetid_union, tracer=tracer, chunk_rows=args.chunk_rows)
 
     n_iter_per_obj = obj_counts.sum(axis=1).astype(np.int32)
 

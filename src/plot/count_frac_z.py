@@ -1,69 +1,25 @@
-import os, re, glob
+import os
 import argparse
 from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-from astropy.io import fits
 plt.style.use('dark_background')
+
+try:
+    from .io_common import (discover_classification_realizations, discover_raw_catalog,
+                            find_col, get_columns, iter_fits_chunks, safe_upper,
+                            tracer_mask)
+except ImportError:
+    from io_common import (discover_classification_realizations, discover_raw_catalog,
+                           find_col, get_columns, iter_fits_chunks, safe_upper,
+                           tracer_mask)
 
 ENV_NAMES = ['Void', 'Sheet', 'Filament', 'Knot']
 
 
 def setup_style():
     plt.rcParams.update({'text.usetex': True})
-
-
-def safe_upper(x):
-    return str(x).strip().upper()
-
-
-def tracer_aliases(tracer):
-    t = safe_upper(tracer)
-    mapping = {'BGS': ('BGS', 'BGS_ANY', 'BGS_BRIGHT'),
-               'BGS_ANY': ('BGS_ANY', 'BGS', 'BGS_BRIGHT'),
-               'BGS_BRIGHT': ('BGS_BRIGHT', 'BGS', 'BGS_ANY'),
-               'ELG': ('ELG', 'ELG_LOPNOTQSO', 'ELG_LOPnotqso'),
-               'ELG_LOPNOTQSO': ('ELG_LOPNOTQSO', 'ELG', 'ELG_LOPnotqso'),
-               'LRG': ('LRG',),
-               'QSO': ('QSO',)}
-    return mapping.get(t, (t,))
-
-
-def parse_iter(path):
-    m = re.search(r'iter(\d+)', str(path))
-    return int(m.group(1)) if m else -1
-
-
-def get_columns(path):
-    with fits.open(path, memmap=True) as hdul:
-        return list(hdul[1].columns.names)
-
-
-def find_col(columns, candidates):
-    for c in candidates:
-        if c in columns:
-            return c
-    return None
-
-
-def iter_fits_chunks(path, columns, chunk_rows=500_000):
-    with fits.open(path, memmap=True) as hdul:
-        hdu = hdul[1]
-        data = hdu.data
-        if data is None:
-            return
-
-        nrows = int(hdu.header.get('NAXIS2', 0))
-        if nrows == 0:
-            return
-
-        use_cols = [c for c in columns if c in hdu.columns.names]
-
-        for start in range(0, nrows, chunk_rows):
-            stop = min(start + chunk_rows, nrows)
-            block = data[start:stop]
-            yield {col: np.asarray(block[col]) for col in use_cols}
 
 
 def r_from_counts(ndata, nrand):
@@ -86,51 +42,26 @@ def classify_from_r(r):
 
 
 def discover_class_files(base, tracer, zone):
-    base = Path(base)
-    tracer_dir = tracer.lower()
-    zone_dir = zone.lower()
-    zone_up = safe_upper(zone)
-
-    aliases_up = [safe_upper(a) for a in tracer_aliases(tracer)]
-    class_root = base / 'classification' / tracer_dir / zone_dir
-
-    files = []
-    for a in aliases_up:
-        patterns = [str(class_root / f'zone_{zone_up}_{a}_iter*.fits.gz'),
-                    str(class_root / f'zone_{zone_up}_{a}_iter*.fits')]
-        for pat in patterns:
-            files.extend(glob.glob(pat))
-
-    files = sorted(set(files), key=parse_iter)
-    return [(parse_iter(f), f) for f in files if parse_iter(f) >= 0]
+    return discover_classification_realizations(base, tracer, zone)
 
 
 def discover_raw_file(base, tracer, zone):
-    base = Path(base)
-    zone_up = safe_upper(zone)
-    aliases_up = [safe_upper(a) for a in tracer_aliases(tracer)]
-
-    matches = []
-    for a in aliases_up:
-        patterns = [str(base / 'raw' / f'zone_{zone_up}_{a}.fits.gz'),
-                    str(base / 'raw' / f'zone_{zone_up}_{a}.fits')]
-        for pat in patterns:
-            matches.extend(glob.glob(pat))
-
-    matches = sorted(set(matches))
-    return matches[0] if matches else None
+    return discover_raw_catalog(base, tracer, zone)
 
 
-def load_z_maps(raw_path, chunk_rows=500_000):
+def load_z_maps(raw_path, tracer, chunk_rows=500_000):
     cols = get_columns(raw_path)
     tid_col = find_col(cols, ('TARGETID', 'targetid'))
     z_col = find_col(cols, ('Z', 'z'))
     randiter_col = find_col(cols, ('RANDITER', 'randiter'))
+    tracer_col = find_col(cols, ('TRACERTYPE', 'tracertype'))
 
     if tid_col is None or z_col is None or randiter_col is None:
         raise ValueError()
 
     wanted = [tid_col, z_col, randiter_col]
+    if tracer_col is not None:
+        wanted.append(tracer_col)
 
     z_real = {}
     z_rand = {}
@@ -141,6 +72,8 @@ def load_z_maps(raw_path, chunk_rows=500_000):
         randiter = np.asarray(chunk[randiter_col], dtype=np.int32)
 
         mask = np.isfinite(z)
+        if tracer_col is not None:
+            mask &= tracer_mask(chunk[tracer_col], tracer)
 
         tid = tid[mask]
         z = z[mask]
@@ -158,7 +91,7 @@ def load_z_maps(raw_path, chunk_rows=500_000):
     return z_real, z_rand
 
 
-def one_iteration_fraction_vs_z(class_path, z_real, z_rand, z_edges, chunk_rows=500_000):
+def one_iteration_fraction_vs_z(class_path, tracer, z_real, z_rand, z_edges, chunk_rows=500_000):
     cols = get_columns(class_path)
 
     tid_col = find_col(cols, ('TARGETID', 'targetid'))
@@ -166,11 +99,14 @@ def one_iteration_fraction_vs_z(class_path, z_real, z_rand, z_edges, chunk_rows=
     nrand_col = find_col(cols, ('NRAND', 'nrand'))
     isdata_col = find_col(cols, ('ISDATA', 'isdata'))
     randiter_col = find_col(cols, ('RANDITER', 'randiter'))
+    tracer_col = find_col(cols, ('TRACERTYPE', 'tracertype'))
 
     if tid_col is None or ndata_col is None or nrand_col is None or isdata_col is None or randiter_col is None:
         raise ValueError()
 
     wanted = [tid_col, ndata_col, nrand_col, isdata_col, randiter_col]
+    if tracer_col is not None:
+        wanted.append(tracer_col)
 
     nbin = len(z_edges) - 1
     counts_obj = np.zeros((4, nbin), dtype=np.int64)
@@ -182,6 +118,18 @@ def one_iteration_fraction_vs_z(class_path, z_real, z_rand, z_edges, chunk_rows=
         nrand = np.asarray(chunk[nrand_col], dtype=np.float32)
         isdata = np.asarray(chunk[isdata_col]).astype(bool)
         randiter = np.asarray(chunk[randiter_col], dtype=np.int32)
+        mask = np.ones(len(tid), dtype=bool)
+        if tracer_col is not None:
+            mask &= tracer_mask(chunk[tracer_col], tracer)
+
+        if not np.any(mask):
+            continue
+
+        tid = tid[mask]
+        ndata = ndata[mask]
+        nrand = nrand[mask]
+        isdata = isdata[mask]
+        randiter = randiter[mask]
 
         z = np.full(len(tid), np.nan, dtype=np.float32)
 
@@ -258,20 +206,21 @@ def zone_mean_fraction_vs_z(base, tracer, zone, z_edges, chunk_rows=500_000,
         return None
 
     if iter_min is not None:
-        class_files = [(it, p) for it, p in class_files if it >= iter_min]
+        class_files = [(it, p) for it, p in class_files if it is None or it >= iter_min]
     if iter_max is not None:
-        class_files = [(it, p) for it, p in class_files if it <= iter_max]
+        class_files = [(it, p) for it, p in class_files if it is None or it <= iter_max]
 
     if len(class_files) == 0:
         return None
 
-    z_real, z_rand = load_z_maps(raw_file, chunk_rows=chunk_rows)
+    z_real, z_rand = load_z_maps(raw_file, tracer=tracer, chunk_rows=chunk_rows)
 
     frac_obj_list = []
     frac_rand_list = []
 
     for it, path in class_files:
         frac_obj, frac_rand = one_iteration_fraction_vs_z(path,
+                                                          tracer,
                                                           z_real,
                                                           z_rand,
                                                           z_edges,

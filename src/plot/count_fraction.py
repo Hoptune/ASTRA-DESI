@@ -1,62 +1,13 @@
-import re, glob
 import argparse
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from astropy.io import fits
-
-
-def safe_upper(x):
-    return str(x).strip().upper()
-
-
-def tracer_aliases(tracer):
-    t = safe_upper(tracer)
-    mapping = {'BGS': ('BGS', 'BGS_ANY', 'BGS_BRIGHT'),
-               'BGS_ANY': ('BGS_ANY', 'BGS', 'BGS_BRIGHT'),
-               'BGS_BRIGHT': ('BGS_BRIGHT', 'BGS', 'BGS_ANY'),
-               'ELG': ('ELG', 'ELG_LOPNOTQSO', 'ELG_LOPnotqso'),
-               'ELG_LOPNOTQSO': ('ELG_LOPNOTQSO', 'ELG', 'ELG_LOPnotqso'),
-               'LRG': ('LRG',),
-               'QSO': ('QSO',)}
-    return mapping.get(t, (t,))
-
-
-def parse_iter(path):
-    m = re.search(r'iter(\d+)', str(path))
-    return int(m.group(1)) if m else -1
-
-
-def get_columns(path):
-    with fits.open(path, memmap=True) as hdul:
-        return list(hdul[1].columns.names)
-
-
-def find_col(columns, candidates):
-    for c in candidates:
-        if c in columns:
-            return c
-    return None
-
-
-def iter_fits_chunks(path, columns, chunk_rows=500_000):
-    with fits.open(path, memmap=True) as hdul:
-        hdu = hdul[1]
-        data = hdu.data
-        if data is None:
-            return
-
-        nrows = int(hdu.header.get('NAXIS2', 0))
-        if nrows == 0:
-            return
-
-        use_cols = [c for c in columns if c in hdu.columns.names]
-
-        for start in range(0, nrows, chunk_rows):
-            stop = min(start + chunk_rows, nrows)
-            block = data[start:stop]
-            yield {col: np.asarray(block[col]) for col in use_cols}
+try:
+    from .io_common import (discover_classification_realizations, find_col,
+                            get_columns, iter_fits_chunks, safe_upper, tracer_mask)
+except ImportError:
+    from io_common import (discover_classification_realizations, find_col,
+                           get_columns, iter_fits_chunks, safe_upper, tracer_mask)
 
 
 def r_from_counts(ndata, nrand):
@@ -81,36 +32,23 @@ def classify_from_r(r):
 
 
 def discover_files(base, tracer, zone):
-    base = Path(base)
-    tracer_dir = tracer.lower()
-    zone_dir = zone.lower()
-    zone_up = safe_upper(zone)
-
-    aliases_up = [safe_upper(a) for a in tracer_aliases(tracer)]
-    class_root = base / 'classification' / tracer_dir / zone_dir
-
-    files = []
-    for a in aliases_up:
-        patterns = [str(class_root / f'zone_{zone_up}_{a}_iter*.fits.gz'),
-                    str(class_root / f'zone_{zone_up}_{a}_iter*.fits')]
-        for pat in patterns:
-            files.extend(glob.glob(pat))
-
-    files = sorted(set(files), key=parse_iter)
-    return [(parse_iter(f), f) for f in files if parse_iter(f) >= 0]
+    return discover_classification_realizations(base, tracer, zone)
 
 
-def one_iteration_fractions(path, chunk_rows=500_000):
+def one_iteration_fractions(path, tracer, chunk_rows=500_000):
     cols = get_columns(path)
 
     ndata_col = find_col(cols, ('NDATA', 'ndata'))
     nrand_col = find_col(cols, ('NRAND', 'nrand'))
     isdata_col = find_col(cols, ('ISDATA', 'isdata'))
+    tracer_col = find_col(cols, ('TRACERTYPE', 'tracertype'))
 
     if ndata_col is None or nrand_col is None or isdata_col is None:
         raise ValueError()
 
     wanted = [ndata_col, nrand_col, isdata_col]
+    if tracer_col is not None:
+        wanted.append(tracer_col)
 
     counts_obj = np.zeros(4, dtype=np.int64)
     counts_rand = np.zeros(4, dtype=np.int64)
@@ -119,6 +57,17 @@ def one_iteration_fractions(path, chunk_rows=500_000):
         ndata = np.asarray(chunk[ndata_col], dtype=np.float32)
         nrand = np.asarray(chunk[nrand_col], dtype=np.float32)
         isdata = np.asarray(chunk[isdata_col]).astype(bool)
+
+        mask = np.ones(len(ndata), dtype=bool)
+        if tracer_col is not None:
+            mask &= tracer_mask(chunk[tracer_col], tracer)
+
+        if not np.any(mask):
+            continue
+
+        ndata = ndata[mask]
+        nrand = nrand[mask]
+        isdata = isdata[mask]
 
         r = r_from_counts(ndata, nrand)
         env = classify_from_r(r)
@@ -139,9 +88,9 @@ def zone_mean_fractions(base, tracer, zone, chunk_rows=500_000, iter_min=None, i
     files = discover_files(base, tracer, zone)
 
     if iter_min is not None:
-        files = [(it, p) for it, p in files if it >= iter_min]
+        files = [(it, p) for it, p in files if it is None or it >= iter_min]
     if iter_max is not None:
-        files = [(it, p) for it, p in files if it <= iter_max]
+        files = [(it, p) for it, p in files if it is None or it <= iter_max]
 
     if len(files) == 0:
         return None
@@ -150,7 +99,7 @@ def zone_mean_fractions(base, tracer, zone, chunk_rows=500_000, iter_min=None, i
     rand_list = []
 
     for it, path in files:
-        frac_obj, frac_rand = one_iteration_fractions(path, chunk_rows=chunk_rows)
+        frac_obj, frac_rand = one_iteration_fractions(path, tracer=tracer, chunk_rows=chunk_rows)
         obj_list.append(frac_obj)
         rand_list.append(frac_rand)
 

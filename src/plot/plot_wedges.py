@@ -25,7 +25,7 @@ else:
 
 matplotlib.use("Agg")
 matplotlib.rcParams['text.usetex'] = True
-matplotlib.rcParams["font.family"] = "serif"
+# matplotlib.rcParams["font.family"] = "serif"
 
 THEME_NAME, THEME = load_theme('PLOT_WEDGE_THEME', default='light')
 apply_matplotlib_theme(THEME)

@@ -1,37 +1,24 @@
-import os, re, glob
+import os
 import argparse
 from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-from astropy.io import fits
 plt.style.use('dark_background')
+
+try:
+    from .io_common import (discover_available_zones,
+                            discover_classification_realizations, find_col,
+                            get_columns, iter_fits_chunks, tracer_mask)
+except ImportError:
+    from io_common import (discover_available_zones,
+                           discover_classification_realizations, find_col,
+                           get_columns, iter_fits_chunks, tracer_mask)
 
 
 def setup_style():
     plt.rcParams.update({'grid.linewidth': 0.3,
                          'text.usetex': True})
-
-
-def safe_upper(x):
-    return str(x).strip().upper()
-
-
-def tracer_aliases(tracer):
-    t = safe_upper(tracer)
-    mapping = {'BGS': ('BGS', 'BGS_ANY', 'BGS_BRIGHT'),
-               'BGS_ANY': ('BGS_ANY', 'BGS', 'BGS_BRIGHT'),
-               'BGS_BRIGHT': ('BGS_BRIGHT', 'BGS', 'BGS_ANY'),
-               'ELG': ('ELG', 'ELG_LOPNOTQSO', 'ELG_LOPnotqso'),
-               'ELG_LOPNOTQSO': ('ELG_LOPNOTQSO', 'ELG', 'ELG_LOPnotqso'),
-               'LRG': ('LRG',),
-               'QSO': ('QSO',)}
-    return mapping.get(t, (t,))
-
-
-def parse_iter(path):
-    m = re.search(r'iter(\d+)', os.path.basename(path))
-    return int(m.group(1)) if m else -1
 
 
 def r_from_counts(ndata, nrand):
@@ -61,48 +48,20 @@ def ecdf_on_grid(values, xgrid):
     return np.interp(xgrid, x, y, left=0.0, right=1.0)
 
 
-def get_columns(path):
-    with fits.open(path, memmap=True) as hdul:
-        return list(hdul[1].columns.names)
-
-
-def find_col(columns, candidates):
-    for c in candidates:
-        if c in columns:
-            return c
-    return None
-
-
-def iter_fits_chunks(path, columns, chunk_rows=500_000):
-    with fits.open(path, memmap=True) as hdul:
-        hdu = hdul[1]
-        data = hdu.data
-        if data is None:
-            return
-
-        nrows = int(hdu.header.get('NAXIS2', 0))
-        if nrows == 0:
-            return
-
-        use_cols = [c for c in columns if c in hdu.columns.names]
-
-        for start in range(0, nrows, chunk_rows):
-            stop = min(start + chunk_rows, nrows)
-            block = data[start:stop]
-            yield {col: np.asarray(block[col]) for col in use_cols}
-
-
-def load_r_real_rand(path, chunk_rows=500_000):
+def load_r_real_rand(path, tracer, chunk_rows=500_000):
     cols = get_columns(path)
 
     ndata_col = find_col(cols, ('NDATA', 'ndata'))
     nrand_col = find_col(cols, ('NRAND', 'nrand'))
     isdata_col = find_col(cols, ('ISDATA', 'isdata'))
+    tracer_col = find_col(cols, ('TRACERTYPE', 'tracertype'))
 
     if ndata_col is None or nrand_col is None or isdata_col is None:
         raise ValueError()
 
     wanted = [ndata_col, nrand_col, isdata_col]
+    if tracer_col is not None:
+        wanted.append(tracer_col)
 
     real_chunks = []
     rand_chunks = []
@@ -111,6 +70,17 @@ def load_r_real_rand(path, chunk_rows=500_000):
         ndata = np.asarray(chunk[ndata_col], dtype=np.float32)
         nrand = np.asarray(chunk[nrand_col], dtype=np.float32)
         isdata = np.asarray(chunk[isdata_col]).astype(bool)
+
+        mask = np.ones(len(ndata), dtype=bool)
+        if tracer_col is not None:
+            mask &= tracer_mask(chunk[tracer_col], tracer)
+
+        if not np.any(mask):
+            continue
+
+        ndata = ndata[mask]
+        nrand = nrand[mask]
+        isdata = isdata[mask]
 
         r = r_from_counts(ndata, nrand)
         valid = np.isfinite(r)
@@ -127,46 +97,30 @@ def load_r_real_rand(path, chunk_rows=500_000):
     return r_real, r_rand
 
 
-def discover_zone_iter_files(base, tracer):
-    base = Path(base)
-    tracer_dir = tracer.lower()
-    aliases_up = [safe_upper(a) for a in tracer_aliases(tracer)]
+def discover_zone_iter_files(base, tracer, zones=None):
+    if zones is None:
+        zones = discover_available_zones(base)
 
     out = {}
-
-    zone_dirs = sorted(glob.glob(str(base / 'classification' / tracer_dir / '*')))
-    for zone_dir in zone_dirs:
-        zone_name = Path(zone_dir).name
-        zone_up = safe_upper(zone_name)
-
-        files = []
-        for a in aliases_up:
-            patterns = [str(Path(zone_dir) / f'zone_{zone_up}_{a}_iter*.fits.gz'),
-                        str(Path(zone_dir) / f'zone_{zone_up}_{a}_iter*.fits')]
-            for pat in patterns:
-                files.extend(glob.glob(pat))
-
-        files = sorted(set(files), key=parse_iter)
-        files = [(parse_iter(f), f) for f in files if parse_iter(f) >= 0]
-
+    for zone in zones:
+        files = discover_classification_realizations(base, tracer, zone)
         if files:
-            out[zone_up] = files
-
+            out[zone] = files
     return out
 
 
 def build_zone_mean_cdfs(files_for_zone, xgrid, chunk_rows=500_000,
-                         iter_min=None, iter_max=None):
+                         tracer=None, iter_min=None, iter_max=None):
     real_curves = []
     rand_curves = []
 
     for it, path in files_for_zone:
-        if iter_min is not None and it < iter_min:
+        if iter_min is not None and it is not None and it < iter_min:
             continue
-        if iter_max is not None and it > iter_max:
+        if iter_max is not None and it is not None and it > iter_max:
             continue
 
-        r_real, r_rand = load_r_real_rand(path, chunk_rows=chunk_rows)
+        r_real, r_rand = load_r_real_rand(path, tracer=tracer, chunk_rows=chunk_rows)
 
         y_real = ecdf_on_grid(r_real, xgrid)
         y_rand = ecdf_on_grid(r_rand, xgrid)
@@ -190,7 +144,7 @@ def build_zone_mean_cdfs(files_for_zone, xgrid, chunk_rows=500_000,
 
 
 def plot_cdf_mean100_sigma_zones(base, outdir, chunk_rows=500_000,
-                                 xbins=400, iter_min=None, iter_max=None):
+                                 xbins=400, zones=None, iter_min=None, iter_max=None):
     colors = {'BGS': 'crimson',
               'LRG': 'green',
               'ELG': 'darkorange',
@@ -205,7 +159,7 @@ def plot_cdf_mean100_sigma_zones(base, outdir, chunk_rows=500_000,
     plotted = False
 
     for tracer in tracers:
-        zone_map = discover_zone_iter_files(base, tracer)
+        zone_map = discover_zone_iter_files(base, tracer, zones=zones)
 
         if len(zone_map) == 0:
             continue
@@ -216,6 +170,7 @@ def plot_cdf_mean100_sigma_zones(base, outdir, chunk_rows=500_000,
         for zone, files_for_zone in zone_map.items():
             mean_real, mean_rand, n_iter_used = build_zone_mean_cdfs(
                 files_for_zone, xgrid=xgrid, chunk_rows=chunk_rows,
+                tracer=tracer,
                 iter_min=iter_min, iter_max=iter_max)
 
             if mean_real is not None:
@@ -281,6 +236,7 @@ def main():
     parser.add_argument('--outdir', required=True)
     parser.add_argument('--chunk-rows', type=int, default=500_000)
     parser.add_argument('--xbins', type=int, default=400)
+    parser.add_argument('--zones', nargs='*', default=None)
     parser.add_argument('--iter-min', type=int, default=None)
     parser.add_argument('--iter-max', type=int, default=None)
     args = parser.parse_args()
@@ -289,7 +245,7 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
 
     plot_cdf_mean100_sigma_zones(base=args.base, outdir=args.outdir,
-                                 chunk_rows=args.chunk_rows, xbins=args.xbins,
+                                 chunk_rows=args.chunk_rows, xbins=args.xbins, zones=args.zones,
                                  iter_min=args.iter_min, iter_max=args.iter_max)
 
 
