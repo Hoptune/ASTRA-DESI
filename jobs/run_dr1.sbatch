@@ -2,13 +2,12 @@
 #SBATCH --job-name=astra_dr1
 #SBATCH --account=desi
 #SBATCH --partition=regular
+#SBATCH --time=00:30:00
+#SBATCH --mem=0
+#SBATCH --array=0-1%1
 #SBATCH -C cpu
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
-#SBATCH --time=00:30:00
-#SBATCH --mem=0
-#SBATCH --array=0%1
-#SBATCH --hint=nomultithread
 #SBATCH --output=/pscratch/sd/v/vtorresg/cosmic-web/dr1/logs/zone_%A_%a.out
 #SBATCH --error=/pscratch/sd/v/vtorresg/cosmic-web/dr1/logs/zone_%A_%a.err
 #SBATCH --chdir=/global/homes/v/vtorresg/ASTRA-DESI
@@ -21,8 +20,12 @@ export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
-export OMP_PLACES=cores
-export OMP_PROC_BIND=close
+
+export ASTRA_CLASS_SPLIT_ITER=0
+export ASTRA_CLASS_SKIP_COMBINED=0
+export ASTRA_PROB_SPLIT_ITER=0
+export ASTRA_PROB_SKIP_COMBINED=0
+export ASTRA_SKIP_GROUPS=1
 
 R_LOWER=${R_LOWER:--0.25}
 R_MED=${R_MED:-0.25}
@@ -40,11 +43,11 @@ CLASS_ROOT="${SCRATCH_ROOT}"
 GROUPS_OUT="${SCRATCH_ROOT}/groups"
 PLOTS_OUT="${SCRATCH_ROOT}/figs"
 LOGDIR="${SCRATCH_ROOT}/logs"
+PAIR_SPILL="${SCRATCH_ROOT}/pair_spill"
 
-mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${GROUPS_OUT}" "${PLOTS_OUT}" "${LOGDIR}"
+mkdir -p "${RAW_OUT}" "${CLASS_ROOT}" "${GROUPS_OUT}" "${PLOTS_OUT}" "${LOGDIR}" "${PAIR_SPILL}"
 
-ZLABELS=("NGC2")
-TRACERS_BY_ZONE=("QSO")
+ZLABELS=("NGC1" "NGC2")
 CONFIG_JSON=${CONFIG_JSON:-}
 
 if (( SLURM_ARRAY_TASK_ID >= ${#ZLABELS[@]} )); then
@@ -53,23 +56,12 @@ if (( SLURM_ARRAY_TASK_ID >= ${#ZLABELS[@]} )); then
 fi
 ZONE_LABEL=${ZLABELS[SLURM_ARRAY_TASK_ID]}
 
-TRACER_LABEL=""
-if (( SLURM_ARRAY_TASK_ID < ${#TRACERS_BY_ZONE[@]} )); then
-  TRACER_LABEL=${TRACERS_BY_ZONE[SLURM_ARRAY_TASK_ID]}
-elif (( ${#TRACERS_BY_ZONE[@]} > 0 )); then
-  TRACER_LABEL=${TRACERS_BY_ZONE[0]}
-fi
-
 TRACE_ARGS=()
-if [[ -n ${TRACER_LABEL} ]]; then
-  TRACE_ARGS+=(--tracers "${TRACER_LABEL}" --out-tag "${TRACER_LABEL}")
-fi
 if [[ -n ${CONFIG_JSON} ]]; then
   TRACE_ARGS+=(--config "${CONFIG_JSON}")
 fi
 
-TRACER_SAFE=${TRACER_LABEL// /_}
-LOG_PREFIX="${LOGDIR}/zone_${ZONE_LABEL}_${TRACER_SAFE:-all}"
+LOG_PREFIX="${LOGDIR}/zone_${ZONE_LABEL}"
 
 srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
      /usr/bin/time -f $'%E elapsed\n%U user CPU\n%S sys CPU\n%P CPU%%\n%M KB max RSS\n' \
@@ -83,10 +75,8 @@ srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --cpu-bind=cores \
        --class-out "${CLASS_ROOT}" \
        --groups-out "${GROUPS_OUT}" \
        --plot-output "${PLOTS_OUT}" \
+       --spill-dir "${PAIR_SPILL}" \
        --r-lower "${R_LOWER}" \
        --r-med "${R_MED}" \
        --r-upper "${R_UPPER}" \
-       --webtype filament \
-       --source data \
-       --n-random 100 \
-       --plot
+       --n-random 100
