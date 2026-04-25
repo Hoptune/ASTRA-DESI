@@ -13,15 +13,28 @@ from .base import ReleaseConfig
 
 
 TRACERS = ['BGS_BRIGHT', 'ELG_LOPnotqso', 'LRG', 'QSO']
-REAL_SUFFIX = {'N': '_N_clustering.dat.fits', 'S': '_S_clustering.dat.fits'}
-RANDOM_SUFFIX = {'N': '_N_{i}_clustering.ran.fits', 'S': '_S_{i}_clustering.ran.fits'}
+REAL_SUFFIX = {'N': ['_N_clustering.dat.fits', '_NGC_clustering.dat.fits'],
+               'S': ['_S_clustering.dat.fits', '_SGC_clustering.dat.fits'],
+               'LRG_complete': {'N': ['_clustering.dat.fits',
+                                      {'stem': 'LRG', 'suffix': '_clustering.dat.fits'}],
+                                'S': None}}
+RANDOM_SUFFIX = {'N': ['_N_{i}_clustering.ran.fits', '_NGC_{i}_clustering.ran.fits'],
+                 'S': ['_S_{i}_clustering.ran.fits', '_SGC_{i}_clustering.ran.fits'],
+                 'LRG_complete': {'N': ['_{i}_clustering.ran.fits',
+                                        {'stem': 'LRG', 'suffix': '_{i}_clustering.ran.fits'}],
+                                  'S': None}}
 N_RANDOM_FILES = 18
 REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
 RANDOM_COLUMNS = REAL_COLUMNS
 DEFAULT_CUTS = {'NGC1': {'RA_min': 110, 'RA_max': 260, 'DEC_min': -10, 'DEC_max': 8},
                 'NGC2': {'RA_min': 180, 'RA_max': 260, 'DEC_min': 30, 'DEC_max': 40}}
 ZONE_VALUES = {'NGC1': 1001, 'NGC2': 1002}
-TRACER_ALIAS = {'bgs': 'BGS_BRIGHT', 'elg': 'ELG_LOPnotqso', 'lrg': 'LRG', 'qso': 'QSO'}
+TRACER_ALIAS = {'bgs': 'BGS_BRIGHT',
+                'elg': 'ELG_LOPnotqso',
+                'lrg': 'LRG',
+                'qso': 'QSO',
+                'lrg_complete': 'LRG_complete',
+                'lrg-complete': 'LRG_complete'}
 EMLINE_CATALOG_PATH = ('/global/cfs/cdirs/desi/public/dr1/vac/dr1/stellar-mass-emline/'
                        'v1.0/dr1_galaxy_stellarmass_lineinfo_v1.0.fits')
 EMLINE_REQUIRED_COLUMNS = ('TARGETID', 'ZERR', 'FLUX_G', 'FLUX_R')

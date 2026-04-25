@@ -73,6 +73,65 @@ def _read_raw_min_compat(raw_dir, class_dir, zone, out_tag=None):
         return raw[present]
 
 
+def _suffix_value(suffix_config, tracer, hemi):
+    if isinstance(suffix_config, dict):
+        if tracer in suffix_config and isinstance(suffix_config[tracer], dict):
+            return suffix_config[tracer].get(hemi)
+        return suffix_config.get(hemi)
+    return suffix_config
+
+
+def _format_suffix_candidate(candidate, tracer, hemi, **format_values):
+    if candidate is None:
+        return None
+    if isinstance(candidate, dict):
+        stem = candidate.get('stem', tracer)
+        suffix = candidate.get('suffix')
+        if suffix is None:
+            return None
+    else:
+        stem = tracer
+        suffix = candidate
+    fmt = {'hemi': hemi, 'tracer': tracer, **format_values}
+    return (str(stem).format(**fmt), str(suffix).format(**fmt))
+
+
+def _suffix_candidates(suffix_config, tracer, hemi, **format_values):
+    value = _suffix_value(suffix_config, tracer, hemi)
+    values = value if isinstance(value, (list, tuple)) else [value]
+    candidates = []
+    for item in values:
+        formatted = _format_suffix_candidate(item, tracer, hemi, **format_values)
+        if formatted is not None:
+            candidates.append(formatted)
+    return candidates
+
+
+def _suffix_for(suffix_config, tracer, hemi, **format_values):
+    """
+    Return the filename suffix for a tracer/hemisphere pair.
+
+    ``suffix_config`` historically mapped hemispheres directly to suffix strings.
+    DR1 mock support also allows tracer-specific overrides, including ``None`` to
+    skip a hemisphere when the source catalogue is all-sky.
+    """
+    candidates = _suffix_candidates(suffix_config, tracer, hemi, **format_values)
+    if not candidates:
+        return None
+    stem, suffix = candidates[0]
+    return suffix if stem == tracer else f'{stem}{suffix}'
+
+
+def _load_first_existing_table(base_dir, candidates, columns):
+    if not candidates:
+        return None
+    paths = [os.path.join(base_dir, stem + suffix) for stem, suffix in candidates]
+    for path in paths:
+        if os.path.exists(path):
+            return load_table(path, columns)
+    return load_table(paths[0], columns)
+
+
 def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_columns,
                        random_columns, n_random_files):
     """
@@ -92,18 +151,31 @@ def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_colum
         RuntimeError: If any table fails to load.
     """
     try:
-        real_tables = {t: {} for t in tracers}
+        real_tables = {t: {'N': None, 'S': None} for t in tracers}
         rand_tables = {t: {'N': {}, 'S': {}} for t in tracers}
 
         for tr in tracers:
             for hemi in ('N', 'S'):
-                real_path = os.path.join(base_dir, tr + real_suffix[hemi])
-                real_tables[tr][hemi] = load_table(real_path, real_columns)
+                real_tables[tr][hemi] = _load_first_existing_table(
+                    base_dir,
+                    _suffix_candidates(real_suffix, tr, hemi),
+                    real_columns,
+                )
 
                 for i in range(n_random_files):
-                    fname = random_suffix[hemi].format(i=i)
-                    path = os.path.join(base_dir, tr + fname)
-                    rand_tables[tr][hemi][i] = load_table(path, random_columns)
+                    rand_tbl = _load_first_existing_table(
+                        base_dir,
+                        _suffix_candidates(random_suffix, tr, hemi, i=i),
+                        random_columns,
+                    )
+                    if rand_tbl is None:
+                        continue
+                    rand_tables[tr][hemi][i] = rand_tbl
+
+            if all(real_tables[tr][hemi] is None for hemi in ('N', 'S')):
+                raise FileNotFoundError(f'No real catalogue suffix configured for tracer {tr}')
+            if not any(rand_tables[tr][hemi] for hemi in ('N', 'S')):
+                raise FileNotFoundError(f'No random catalogue suffix configured for tracer {tr}')
 
         return real_tables, rand_tables
     except Exception as e:
