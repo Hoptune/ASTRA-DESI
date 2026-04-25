@@ -114,7 +114,7 @@ def _append_emline_columns(raw_table, emline_best):
 
 
 def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, tracers,
-                    north_rosettes, out_tag, release_tag):
+                    north_rosettes, out_tag, release_tag, include_emline=True):
     """
     Build and persist the EDR raw table for ``zone``.
 
@@ -128,6 +128,7 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, trac
         north_rosettes: Set of rosette numbers in the North.
         out_tag: Optional tag to append to output filename.
         release_tag: Optional release tag to include in metadata.
+        include_emline: When True, join stellar-mass/emission-line VAC columns.
     Returns:
         The combined raw table for the specified zone.
     """
@@ -142,7 +143,10 @@ def build_raw_table(zone, real_tables, random_tables, output_raw, n_random, trac
     tbl = vstack(parts)
     if 'RANDITER' in tbl.colnames:
         tbl['RANDITER'] = np.asarray(tbl['RANDITER'], dtype=np.int32)
-    tbl = _append_emline_columns(tbl, _load_emline_best())
+    if include_emline:
+        tbl = _append_emline_columns(tbl, _load_emline_best())
+    else:
+        print('[edr] skipping emline enrichment', flush=True)
 
     tag_suffix = safe_tag(out_tag)
     out_path = os.path.join(output_raw, f'zone_{zone:02d}{tag_suffix}.fits.gz')
@@ -181,7 +185,8 @@ def create_config(args: Namespace) -> ReleaseConfig:
     def _build(zone, real_tables, random_tables, sel_tracers, parsed_args, release_tag):
         return build_raw_table(int(zone), real_tables, random_tables, parsed_args.raw_out,
                                parsed_args.n_random, sel_tracers, NORTH_ROSETTES,
-                               out_tag=parsed_args.out_tag, release_tag=release_tag)
+                               out_tag=parsed_args.out_tag, release_tag=release_tag,
+                               include_emline=not getattr(parsed_args, 'skip_emline', False))
 
     return ReleaseConfig(name='EDR', release_tag='EDR', tracers=TRACERS,
                          tracer_alias=TRACER_ALIAS, real_suffix=REAL_SUFFIX,

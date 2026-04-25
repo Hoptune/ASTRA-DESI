@@ -579,6 +579,8 @@ def main():
         p.add_argument('--zones', nargs='+', type=str, default=None,
                        help='For DR1: zone labels to run (e.g., NGC1 NGC2). For EDR, ignored if --zone is given.')
         p.add_argument('--config', type=str, default=None, help='Optional JSON file with cuts per label for DR1 (keys like NGC1/NGC2).')
+        p.add_argument('--skip-emline', action='store_true',
+                       help='For EDR/DR1, skip joining the stellar-mass/emission-line VAC into raw outputs.')
 
         args = p.parse_args()
 

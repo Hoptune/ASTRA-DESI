@@ -149,7 +149,8 @@ def _append_emline_columns(raw_table, emline_best):
 
 
 def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tables,
-                     output_raw, n_random, zone_value, out_tag, release_tag):
+                     output_raw, n_random, zone_value, out_tag, release_tag,
+                     include_emline=True):
     """
     Build and persist the DR1 raw table for ``zone_label`` applying ``cuts``.
 
@@ -165,6 +166,7 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
         zone_value: Integer value to assign to the ZONE column.
         out_tag: Optional tag to append to the output file name.
         release_tag: Release tag string or None.
+        include_emline: When True, join stellar-mass/emission-line VAC columns.
     Returns:
         The combined table written to disk.
     """
@@ -188,7 +190,10 @@ def build_raw_region(zone_label, cuts, region, tracers, real_tables, random_tabl
     tbl = vstack(parts)
     if 'RANDITER' in tbl.colnames:
         tbl['RANDITER'] = np.asarray(tbl['RANDITER'], dtype=np.int32)
-    tbl = _append_emline_columns(tbl, _load_emline_best())
+    if include_emline:
+        tbl = _append_emline_columns(tbl, _load_emline_best())
+    else:
+        print('[dr1] skipping emline enrichment', flush=True)
 
     tag_suffix = safe_tag(out_tag)
     out_path = os.path.join(output_raw, f'zone_{zone_label}{tag_suffix}.fits.gz')
@@ -252,7 +257,8 @@ def create_config(args: Namespace) -> ReleaseConfig:
         zone_cuts = cuts[label]
         return build_raw_region(label, zone_cuts, 'ALL', sel_tracers, real_tables, random_tables,
                                 parsed_args.raw_out, parsed_args.n_random, zone_value,
-                                out_tag=parsed_args.out_tag, release_tag=release_tag)
+                                out_tag=parsed_args.out_tag, release_tag=release_tag,
+                                include_emline=not getattr(parsed_args, 'skip_emline', False))
 
     return ReleaseConfig(name='DR1', release_tag='DR1', tracers=TRACERS, tracer_alias=TRACER_ALIAS,
                          real_suffix=REAL_SUFFIX, random_suffix=RANDOM_SUFFIX,

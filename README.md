@@ -60,6 +60,8 @@ Key CLI options:
 - `--r-lower` and `--r-upper` control the asymmetric thresholds used when classifying
   web types (defaults: `-0.9`, `0.9`).
 - `--tracers` can restrict processing to a subset of tracer prefixes.
+- `--skip-emline` skips the EDR/DR1 stellar-mass/emission-line VAC join when those
+  metadata columns are not needed or the VAC is unavailable.
 - `--plot` enables post-processing plots (written to `--plot-output` or `--groups-out`).
 - `--only-plot` skips the heavy processing steps and reuses existing outputs.
 
