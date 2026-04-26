@@ -31,8 +31,8 @@ _PAIR_ROW_DTYPE = np.dtype([('TARGETID1', np.int64),
 _CLASS_ROW_DTYPE = np.dtype([('TARGETID', np.int64),
                              ('RANDITER', np.int32),
                              ('ISDATA', np.bool_),
-                             ('NDATA', np.int32),
-                             ('NRAND', np.int32),
+                             ('NDATA', np.float32),
+                             ('NRAND', np.float32),
                              ('TRACER_ID', np.uint8),
                              ('TRACERTYPE', 'S24')])
 _TRACER_ASCII_DTYPE = _CLASS_ROW_DTYPE.fields['TRACERTYPE'][0]
@@ -398,7 +398,44 @@ def _normalize_tracertype_label(value):
     return text
 
 
-def _gp_init_worker(tids, rand_sub, coords, is_data, tracer, tracer_id):
+def _sanitize_weights(values, size):
+    """
+    Return non-negative finite float32 weights, defaulting invalid values to 1.
+    """
+    weights = np.asarray(values, dtype=np.float32)
+    if weights.shape[0] != int(size):
+        raise ValueError(f'Weight array length {weights.shape[0]} does not match row count {size}')
+    bad = ~np.isfinite(weights) | (weights < 0)
+    if np.any(bad):
+        weights = weights.copy()
+        weights[bad] = 1.0
+    return weights
+
+
+def _normalize_random_weights_to_data_mean(weights, is_data):
+    """
+    Scale random weights so their mean matches the data/galaxy weight mean.
+    """
+    if weights is None:
+        return None
+    weights = np.asarray(weights, dtype=np.float32)
+    is_data = np.asarray(is_data, dtype=bool)
+    data_mask = is_data
+    rand_mask = ~is_data
+    if not data_mask.any() or not rand_mask.any():
+        return weights
+
+    data_mean = float(np.mean(weights[data_mask], dtype=np.float64))
+    rand_mean = float(np.mean(weights[rand_mask], dtype=np.float64))
+    if not np.isfinite(data_mean) or not np.isfinite(rand_mean) or data_mean <= 0 or rand_mean <= 0:
+        return weights
+
+    scaled = weights.copy()
+    scaled[rand_mask] *= np.float32(data_mean / rand_mean)
+    return scaled
+
+
+def _gp_init_worker(tids, rand_sub, coords, is_data, weights, tracer, tracer_id):
     """
     Initialise shared worker state for multiprocessing jobs.
 
@@ -411,10 +448,10 @@ def _gp_init_worker(tids, rand_sub, coords, is_data, tracer, tracer_id):
         tracer_id (int): Integer tracer identifier.
     """
     global _GP_SHARED
-    _GP_SHARED = (tids, rand_sub, coords, is_data, tracer, int(tracer_id))
+    _GP_SHARED = (tids, rand_sub, coords, is_data, weights, tracer, int(tracer_id))
 
 
-def extract_tracer_blocks(tbl):
+def extract_tracer_blocks(tbl, weight_column=None):
     """
     Group table rows by tracer prefix and return per-tracer blocks.
 
@@ -429,6 +466,12 @@ def extract_tracer_blocks(tbl):
     coords_all = np.column_stack((np.asarray(tbl['XCART'], dtype=np.float32),
                                   np.asarray(tbl['YCART'], dtype=np.float32),
                                   np.asarray(tbl['ZCART'], dtype=np.float32)))
+    if weight_column is not None:
+        if weight_column not in tbl.colnames:
+            raise KeyError(f"Weight column '{weight_column}' not found in raw table")
+        weights_all = _sanitize_weights(tbl[weight_column], len(tbl))
+    else:
+        weights_all = None
 
     tracer_ids = None
     if 'TRACER_ID' in tbl.colnames:
@@ -458,10 +501,13 @@ def extract_tracer_blocks(tbl):
             mask = (tracer_ids == tracer_id)
             idxs = np.nonzero(mask)[0]
             label = label_by_id.get(int(tracer_id), str(tracer_id))
+            is_data = randiters[idxs] == -1
+            weights = None if weights_all is None else _normalize_random_weights_to_data_mean(weights_all[idxs], is_data)
             blocks[label] = {'tids': targetids[idxs],
                              'rand': randiters[idxs],
                              'coords': coords_all[idxs],
-                             'is_data': randiters[idxs] == -1,
+                             'is_data': is_data,
+                             'weights': weights,
                              'label': label,
                              'tracer_id': int(tracer_id)}
     else:
@@ -470,10 +516,13 @@ def extract_tracer_blocks(tbl):
         for tracer in prefixes:
             mask = (base_tracer == tracer)
             idxs = np.nonzero(mask)[0]
+            is_data = randiters[idxs] == -1
+            weights = None if weights_all is None else _normalize_random_weights_to_data_mean(weights_all[idxs], is_data)
             blocks[tracer] = {'tids': targetids[idxs],
                               'rand': randiters[idxs],
                               'coords': coords_all[idxs],
-                              'is_data': randiters[idxs] == -1,
+                              'is_data': is_data,
+                              'weights': weights,
                               'label': tracer,
                               'tracer_id': _tracer_id_from_label(tracer)}
     return blocks
@@ -508,7 +557,7 @@ def compute_delaunay_pairs(pts):
     return np.asarray(out, dtype=np.int64)
 
 
-def process_delaunay(pts, tids, is_data, iteration, tracer, tracer_id=None):
+def process_delaunay(pts, tids, is_data, iteration, tracer, tracer_id=None, weights=None):
     """
     Generate pair and classification arrays for a single tracer iteration.
 
@@ -523,18 +572,27 @@ def process_delaunay(pts, tids, is_data, iteration, tracer, tracer_id=None):
     """
     pairs = compute_delaunay_pairs(pts)
     n = len(tids)
+    if weights is not None:
+        weights = _sanitize_weights(weights, n)
 
     if pairs.size == 0:
         pair_rows = np.empty(0, dtype=_PAIR_ROW_DTYPE)
-        total_count = np.zeros(n, dtype=np.int32)
-        data_count = np.zeros(n, dtype=np.int32)
+        total_count = np.zeros(n, dtype=np.float32)
+        data_count = np.zeros(n, dtype=np.float32)
     else:
         idx0, idx1 = pairs[:, 0], pairs[:, 1]
-        total_count = np.bincount(idx0, minlength=n) + np.bincount(idx1, minlength=n)
         mask0 = is_data[idx0]
         mask1 = is_data[idx1]
-        data_count = (np.bincount(idx0[mask1], minlength=n) +
-                      np.bincount(idx1[mask0], minlength=n))
+        if weights is None:
+            total_count = (np.bincount(idx0, minlength=n) +
+                           np.bincount(idx1, minlength=n)).astype(np.float32, copy=False)
+            data_count = (np.bincount(idx0[mask1], minlength=n) +
+                          np.bincount(idx1[mask0], minlength=n)).astype(np.float32, copy=False)
+        else:
+            total_count = (np.bincount(idx0, weights=weights[idx1], minlength=n) +
+                           np.bincount(idx1, weights=weights[idx0], minlength=n)).astype(np.float32, copy=False)
+            data_count = (np.bincount(idx0[mask1], weights=weights[idx1[mask1]], minlength=n) +
+                          np.bincount(idx1[mask0], weights=weights[idx0[mask0]], minlength=n)).astype(np.float32, copy=False)
 
         pair_rows = np.empty(pairs.shape[0], dtype=_PAIR_ROW_DTYPE)
         pair_rows['TARGETID1'] = tids[idx0].astype(np.int64, copy=False)
@@ -545,8 +603,8 @@ def process_delaunay(pts, tids, is_data, iteration, tracer, tracer_id=None):
     class_rows['TARGETID'] = tids.astype(np.int64, copy=False)
     class_rows['RANDITER'] = iteration
     class_rows['ISDATA'] = is_data.astype(bool, copy=False)
-    class_rows['NDATA'] = data_count.astype(np.int32, copy=False)
-    class_rows['NRAND'] = (total_count - data_count).astype(np.int32, copy=False)
+    class_rows['NDATA'] = data_count.astype(np.float32, copy=False)
+    class_rows['NRAND'] = (total_count - data_count).astype(np.float32, copy=False)
     tracer_code = tracer_id if tracer_id is not None and tracer_id >= 0 else _tracer_id_from_label(tracer)
     if tracer_code < 0:
         tracer_code = 255
@@ -565,16 +623,17 @@ def _gp_process_iter(j):
     Returns:
         tuple[np.ndarray | None, np.ndarray | None]: Pair and classification rows.
     """
-    tids, rand_sub, coords, is_data, tracer, tracer_id = _GP_SHARED
+    tids, rand_sub, coords, is_data, weights, tracer, tracer_id = _GP_SHARED
     print(f'[astra] tracer={tracer} iter={j}', flush=True)
     mask = is_data | (rand_sub == j)
     if not mask.any():
         return None, None
+    weight_sub = None if weights is None else weights[mask]
     return process_delaunay(coords[mask], tids[mask], is_data[mask], j, tracer,
-                            tracer_id=tracer_id)
+                            tracer_id=tracer_id, weights=weight_sub)
 
 
-def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
+def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None, use_weights=False, weight_column='WEIGHT'):
     """
     Run the pair-generation pipeline for all tracers in ``tbl``.
 
@@ -583,6 +642,8 @@ def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
         n_random (int): Total number of random iterations available.
         n_jobs (int, optional): Parallel worker count; defaults to available CPUs.
         spill_dir (str | None): Optional directory where temporary chunks are stored.
+        use_weights (bool): Use ``weight_column`` values for neighbor counts.
+        weight_column (str): Raw table weight column used when ``use_weights`` is true.
     Returns:
         tuple[TempTableStore, TempTableStore, dict]: Disk-backed pair and classification
         stores plus an (empty) placeholder for backwards compatibility.
@@ -617,19 +678,20 @@ def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
             except Exception:
                 pass
 
-    blocks = extract_tracer_blocks(tbl)
+    blocks = extract_tracer_blocks(tbl, weight_column=weight_column if use_weights else None)
     for tracer, data in blocks.items():
-        tids, rand_sub, coords, is_data, tracer_label = (data['tids'],
-                                                         data['rand'],
-                                                         data['coords'],
-                                                         data['is_data'],
-                                                         data['label'])
+        tids, rand_sub, coords, is_data, weights, tracer_label = (data['tids'],
+                                                                  data['rand'],
+                                                                  data['coords'],
+                                                                  data['is_data'],
+                                                                  data.get('weights'),
+                                                                  data['label'])
         tracer_id = data.get('tracer_id', _tracer_id_from_label(tracer_label))
 
         if n_jobs > 1:
             with mp.get_context('fork').Pool(processes=n_jobs,
                                              initializer=_gp_init_worker,
-                                             initargs=(tids, rand_sub, coords, is_data,
+                                             initargs=(tids, rand_sub, coords, is_data, weights,
                                                        tracer_label, tracer_id)) as pool:
                 for pr, cr in pool.imap_unordered(_gp_process_iter, range(n_random)):
                     if pr is not None and pr.size:
@@ -642,8 +704,10 @@ def generate_pairs(tbl, n_random, n_jobs=None, spill_dir=None):
                 mask = is_data | (rand_sub == j)
                 if not mask.any():
                     continue
+                weight_sub = None if weights is None else weights[mask]
                 pr, cr = process_delaunay(coords[mask], tids[mask], is_data[mask], j,
-                                          tracer_label, tracer_id=tracer_id)
+                                          tracer_label, tracer_id=tracer_id,
+                                          weights=weight_sub)
                 if pr.size:
                     pair_store.append(pr)
                 if cr.size:
@@ -786,7 +850,8 @@ def load_pairs_fits(path):
         return Table.read(path)
 
 
-def build_class_rows_from_pairs(tbl, pairs_tbl, n_random, spill_dir=None):
+def build_class_rows_from_pairs(tbl, pairs_tbl, n_random, spill_dir=None,
+                                use_weights=False, weight_column='WEIGHT'):
     """
     Reconstruct classification rows from previously saved pairs.
 
@@ -795,6 +860,8 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random, spill_dir=None):
         pairs_tbl (Table): Table containing pair information.
         n_random (int): Number of random iterations present in the dataset.
         spill_dir (str | None): Optional directory for temporary spill files.
+        use_weights (bool): Use ``weight_column`` values for neighbor counts.
+        weight_column (str): Raw table weight column used when ``use_weights`` is true.
     Returns:
         TempTableStore: Disk-backed store of classification rows.
     """
@@ -807,7 +874,18 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random, spill_dir=None):
     trtype = np.asarray(tbl['TRACERTYPE']).astype('U24') if 'TRACERTYPE' in tbl.colnames else np.array(
         [_TRACER_ID_TO_NAME.get(int(code), 'UNKNOWN') for code in tracer_ids], dtype='U24')
 
+    if use_weights:
+        if weight_column not in tbl.colnames:
+            raise KeyError(f"Weight column '{weight_column}' not found in raw table")
+        weights = _sanitize_weights(tbl[weight_column], len(tbl))
+        for tracer_id in np.unique(tracer_ids):
+            mask = tracer_ids == tracer_id
+            weights[mask] = _normalize_random_weights_to_data_mean(weights[mask], randiter[mask] == -1)
+    else:
+        weights = np.ones(tids.size, dtype=np.float32)
+
     is_data_map = {int(t): (ri == -1) for t, ri in zip(tids, randiter)}
+    weight_map = {int(t): float(w) for t, w in zip(tids, weights)}
     tracer_map = {int(t): str(tt) for t, tt in zip(tids, trtype)}
     tracer_id_map = {int(t): int(code) for t, code in zip(tids, tracer_ids)}
     tracer_bytes_map = {int(t): str(tt).encode('ascii', errors='ignore')
@@ -846,19 +924,22 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random, spill_dir=None):
                 idx_a = inv[:a.size]
                 idx_b = inv[a.size:]
 
-                total = np.zeros(uniq.size, dtype=np.int64)
-                np.add.at(total, idx_a, 1)
-                np.add.at(total, idx_b, 1)
+                weights_uniq = np.fromiter((weight_map.get(int(t), 1.0) for t in uniq),
+                                            dtype=np.float32, count=uniq.size)
+
+                total = np.zeros(uniq.size, dtype=np.float32)
+                np.add.at(total, idx_a, weights_uniq[idx_b])
+                np.add.at(total, idx_b, weights_uniq[idx_a])
 
                 is_data_uniq = np.fromiter((1 if is_data_map.get(int(t), False) else 0 for t in uniq),
                                             dtype=np.int8, count=uniq.size)
 
-                ndata = np.zeros(uniq.size, dtype=np.int64)
-                np.add.at(ndata, idx_a, is_data_uniq[idx_b].astype(np.int64))
-                np.add.at(ndata, idx_b, is_data_uniq[idx_a].astype(np.int64))
+                ndata = np.zeros(uniq.size, dtype=np.float32)
+                np.add.at(ndata, idx_a, weights_uniq[idx_b] * is_data_uniq[idx_b].astype(np.float32))
+                np.add.at(ndata, idx_b, weights_uniq[idx_a] * is_data_uniq[idx_a].astype(np.float32))
 
-                total_map = {int(t): int(c) for t, c in zip(uniq.tolist(), total.tolist())}
-                ndata_map = {int(t): int(c) for t, c in zip(uniq.tolist(), ndata.tolist())}
+                total_map = {int(t): float(c) for t, c in zip(uniq.tolist(), total.tolist())}
+                ndata_map = {int(t): float(c) for t, c in zip(uniq.tolist(), ndata.tolist())}
             else:
                 total_map, ndata_map = {}, {}
         else:
@@ -866,9 +947,9 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random, spill_dir=None):
 
         if data_ids.size:
             nd_vals = np.fromiter((ndata_map.get(int(t), 0) for t in data_ids),
-                                  dtype=np.int32, count=data_ids.size)
+                                  dtype=np.float32, count=data_ids.size)
             total_vals = np.fromiter((total_map.get(int(t), 0) for t in data_ids),
-                                     dtype=np.int32, count=data_ids.size)
+                                     dtype=np.float32, count=data_ids.size)
             rand_vals = total_vals - nd_vals
 
             arr_data = np.empty(data_ids.size, dtype=_CLASS_ROW_DTYPE)
@@ -887,9 +968,9 @@ def build_class_rows_from_pairs(tbl, pairs_tbl, n_random, spill_dir=None):
         rids = rand_ids_by_j.get(j, np.empty(0, dtype=np.int64))
         if rids.size:
             nd_vals_r = np.fromiter((ndata_map.get(int(t), 0) for t in rids),
-                                    dtype=np.int32, count=rids.size)
+                                    dtype=np.float32, count=rids.size)
             total_vals_r = np.fromiter((total_map.get(int(t), 0) for t in rids),
-                                       dtype=np.int32, count=rids.size)
+                                       dtype=np.float32, count=rids.size)
             rand_vals_r = total_vals_r - nd_vals_r
 
             arr_rand = np.empty(rids.size, dtype=_CLASS_ROW_DTYPE)
@@ -938,8 +1019,8 @@ def save_classification_fits(rows, output_path, meta=None):
     columns = (('TARGETID', 'K'),
                ('RANDITER', 'J'),
                ('ISDATA', 'L'),
-               ('NDATA', 'J'),
-               ('NRAND', 'J'),
+               ('NDATA', 'E'),
+               ('NRAND', 'E'),
                ('TRACER_ID', 'B'),
                ('TRACERTYPE', '24A'))
     split_iter = _bool_env('ASTRA_CLASS_SPLIT_ITER', default=True)

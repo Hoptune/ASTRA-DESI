@@ -17,6 +17,20 @@ def _bool_env(name, default=False):
         return default
     return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
 
+
+def _weighted_out_tag(out_tag, weight_column):
+    """
+    Return an output tag that makes weighted products explicit in filenames.
+    """
+    base = '' if out_tag is None else str(out_tag).strip()
+    suffix = 'weighted' if str(weight_column).upper() == 'WEIGHT' else f'weighted_{weight_column}'
+    if not base:
+        return suffix
+    if suffix.lower() in base.lower():
+        return base
+    return f'{base}_{suffix}'
+
+
 # Set default environment variables for per-iteration classification/probability
 os.environ.setdefault('ASTRA_CLASS_SPLIT_ITER', '1')
 os.environ.setdefault('ASTRA_CLASS_SKIP_COMBINED', '1')
@@ -187,7 +201,8 @@ def preload_all_tables(base_dir, tracers, real_suffix, random_suffix, real_colum
 def classify_zone(zone, tbl, output_class, n_random, r_lower, r_med, r_upper,
                   out_tag=None, release_tag=None,
                   reuse_pair_store=None, reuse_class_store=None,
-                  spill_dir=None, allow_pair_reuse=False):
+                  spill_dir=None, allow_pair_reuse=False,
+                  use_weights=False, weight_column='WEIGHT'):
     """
     Classify a zone by generating pairs, classification, and probability files.
     Saves the generated files in the specified output directory.
@@ -219,7 +234,10 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_med, r_upper,
             'RLOWER': float(r_lower),
             'RMED': float(r_med),
             'RUPPER': float(r_upper),
+            'WEIGHTED': bool(use_weights),
         }
+        if use_weights:
+            meta['WCOL'] = str(weight_column)
 
         for path in (pairs_file, class_file, prob_file):
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -255,8 +273,10 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_med, r_upper,
                         need_regen = True
                     else:
                         try:
-                            class_store = astra.build_class_rows_from_pairs(tbl, ptbl, n_random,
-                                                                            spill_dir=spill_dir)
+                            class_store = astra.build_class_rows_from_pairs(
+                                tbl, ptbl, n_random, spill_dir=spill_dir,
+                                use_weights=use_weights, weight_column=weight_column,
+                            )
                             cleanup_class = True
                             need_regen = False
                         except Exception as e:
@@ -264,7 +284,10 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_med, r_upper,
                             class_store = None
                             need_regen = True
                     if class_store is None and need_regen:
-                        pr, cr, _ = astra.generate_pairs(tbl, n_random, spill_dir=spill_dir)
+                        pr, cr, _ = astra.generate_pairs(
+                            tbl, n_random, spill_dir=spill_dir,
+                            use_weights=use_weights, weight_column=weight_column,
+                        )
                         try:
                             astra.save_pairs_fits(pr, pairs_file, meta=meta)
                             astra.save_classification_fits(cr, class_file, meta=meta)
@@ -304,7 +327,10 @@ def classify_zone(zone, tbl, output_class, n_random, r_lower, r_med, r_upper,
                 else:
                     print(f'[classify] Warning: reuse paths are invalid; falling back to regeneration.')
             if not reused_stores:
-                pr, cr, _ = astra.generate_pairs(tbl, n_random, spill_dir=spill_dir)
+                pr, cr, _ = astra.generate_pairs(
+                    tbl, n_random, spill_dir=spill_dir,
+                    use_weights=use_weights, weight_column=weight_column,
+                )
             try:
                 astra.save_pairs_fits(pr, pairs_file, meta=meta)
                 astra.save_classification_fits(cr, class_file, meta=meta)
@@ -644,6 +670,10 @@ def main():
                        help='Directory where temporary chunk files are written (defaults to $ASTRA_TMPDIR/PSCRATCH/TMPDIR).')
         p.add_argument('--chunk-rows', type=int, default=None,
                        help='Override the default chunk size used when writing FITS outputs.')
+        p.add_argument('--use-weights', action='store_true',
+                       help='Use --weight-column values instead of unit counts for NDATA/NRAND rank ratios.')
+        p.add_argument('--weight-column', default='WEIGHT',
+                       help='Raw table column used when --use-weights is enabled (default: WEIGHT).')
 
         p.add_argument('--release', choices=['EDR','DR1','DR2'], default='EDR',
                        help='Data release: EDR (rosettes), DR1 (NGC1/NGC2 boxes), DR2 (full-sky NGC/SGC split)')
@@ -666,6 +696,9 @@ def main():
             args.r_upper = sym
         if args.r_lower >= 0 or args.r_upper <= 0 or not (args.r_lower < args.r_med < args.r_upper):
             raise ValueError('--r thresholds must satisfy --r-lower < --r-med < --r-upper with --r-lower < 0 < --r-upper.')
+
+        if args.use_weights:
+            args.out_tag = _weighted_out_tag(args.out_tag, args.weight_column)
 
         if args.chunk_rows and args.chunk_rows > 0:
             astra._DEFAULT_CHUNK_ROWS = max(1, int(args.chunk_rows))
@@ -783,7 +816,9 @@ def main():
                           reuse_pair_store=args.reuse_pairs_store,
                           reuse_class_store=args.reuse_class_store,
                           spill_dir=args.spill_dir,
-                          allow_pair_reuse=args.allow_pair_reuse)
+                          allow_pair_reuse=args.allow_pair_reuse,
+                          use_weights=args.use_weights,
+                          weight_column=args.weight_column)
             print(f'-- [pipeline] Classified zone {z} in {time.time()-stage_start:.2f} s')
 
             if _bool_env('ASTRA_SKIP_GROUPS', False) or (_bool_env('ASTRA_CLASS_SKIP_COMBINED', False) and _bool_env('ASTRA_CLASS_SPLIT_ITER', False)):

@@ -24,7 +24,7 @@ RANDOM_SUFFIX = {'N': ['_N_{i}_clustering.ran.fits', '_NGC_{i}_clustering.ran.fi
                                         {'stem': 'LRG', 'suffix': '_{i}_clustering.ran.fits'}],
                                   'S': None}}
 N_RANDOM_FILES = 18
-REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z']
+REAL_COLUMNS = ['TARGETID', 'RA', 'DEC', 'Z', 'WEIGHT']
 RANDOM_COLUMNS = REAL_COLUMNS
 DEFAULT_CUTS = {'NGC1': {'RA_min': 110, 'RA_max': 260, 'DEC_min': -10, 'DEC_max': 8},
                 'NGC2': {'RA_min': 180, 'RA_max': 260, 'DEC_min': 30, 'DEC_max': 40}}
